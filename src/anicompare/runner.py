@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import os
 import shutil
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from .io import FastaRecord, read_fasta, read_json, write_fasta, write_json, write_tsv
 from .kmers import exact_kmer_set, jaccard_similarity
-from .minimap2_ani import parse_sam_for_ani, run_minimap2
+from .minimap2_ani import choose_minimap2_preset, parse_sam_for_ani, run_minimap2
 from .modimizers import modimizer_set
 from .mutate import MutationRates, mutate_records
 from .random_genome import generate_random_record
@@ -28,9 +28,13 @@ MASTER_FIELDS = [
     "realized_substitution_rate",
     "realized_insertion_rate",
     "realized_deletion_rate",
+    "minimap2_preset",
     "minimap2_ani",
     "minimap2_aligned_bases",
     "minimap2_edit_distance",
+    "minimap2_query_bases",
+    "minimap2_query_coverage",
+    "minimap2_mapped_records",
     "jaccard_similarity",
     "comparison_mode",
     "k",
@@ -181,17 +185,27 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         _write_log(log_path, [f"Reused existing mutated genome for rate {rate}"])
 
     if not sam_path.exists():
+        preset = str(job["minimap2_preset"])
+        if preset == "auto":
+            preset = choose_minimap2_preset(float(job["rate"]))
         run_minimap2(
             reference_fasta=reference_path,
             query_fasta=mutated_path,
             sam_path=sam_path,
             executable=str(job["minimap2_executable"]),
             threads=int(job["minimap2_threads"]),
-            preset=str(job["minimap2_preset"]),
+            preset=preset,
         )
         _write_log(log_path, ["Completed minimap2 alignment"])
+    else:
+        preset = str(job["minimap2_preset"])
+        if preset == "auto":
+            preset = choose_minimap2_preset(float(job["rate"]))
 
     sam_metrics = parse_sam_for_ani(sam_path)
+    mutated_records = read_fasta(mutated_path)
+    total_query_bases = sum(len(record.sequence) for record in mutated_records)
+    query_coverage = sam_metrics.aligned_bases / total_query_bases if total_query_bases else 0.0
     write_tsv(
         [
             {
@@ -199,15 +213,15 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 "aligned_bases": sam_metrics.aligned_bases,
                 "edit_distance": sam_metrics.edit_distance,
                 "query_bases": sam_metrics.query_bases,
-                "ani": sam_metrics.ani,
+                "query_coverage": query_coverage,
+                "ani": "" if sam_metrics.ani is None else sam_metrics.ani,
             }
         ],
         minimap_metrics_path,
-        fieldnames=["mapped_records", "aligned_bases", "edit_distance", "query_bases", "ani"],
+        fieldnames=["mapped_records", "aligned_bases", "edit_distance", "query_bases", "query_coverage", "ani"],
     )
 
     reference_records = read_fasta(reference_path)
-    mutated_records = read_fasta(mutated_path)
     sketch_config = SketchConfig(mode=str(job["sketch_mode"]), modulus=int(job["modimizer_modulus"]))
     reference_set = _comparison_set(reference_records, k=int(job["k"]), sketch_config=sketch_config)
     mutated_set = _comparison_set(mutated_records, k=int(job["k"]), sketch_config=sketch_config)
@@ -239,9 +253,13 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         "realized_substitution_rate": metadata_summary["realized_substitution_rate"],
         "realized_insertion_rate": metadata_summary["realized_insertion_rate"],
         "realized_deletion_rate": metadata_summary["realized_deletion_rate"],
-        "minimap2_ani": sam_metrics.ani,
+        "minimap2_preset": preset,
+        "minimap2_ani": "" if sam_metrics.ani is None else sam_metrics.ani,
         "minimap2_aligned_bases": sam_metrics.aligned_bases,
         "minimap2_edit_distance": sam_metrics.edit_distance,
+        "minimap2_query_bases": total_query_bases,
+        "minimap2_query_coverage": query_coverage,
+        "minimap2_mapped_records": sam_metrics.mapped_records,
         "jaccard_similarity": jaccard,
         "comparison_mode": sketch_config.mode,
         "k": int(job["k"]),
@@ -296,8 +314,12 @@ def run_experiment(config: ExperimentConfig) -> Path:
     if config.workers <= 1:
         results = [_run_single_job(job) for job in jobs]
     else:
-        with ProcessPoolExecutor(max_workers=config.workers) as executor:
-            results = list(executor.map(_run_single_job, jobs))
+        try:
+            with ProcessPoolExecutor(max_workers=config.workers) as executor:
+                results = list(executor.map(_run_single_job, jobs))
+        except PermissionError:
+            with ThreadPoolExecutor(max_workers=config.workers) as executor:
+                results = list(executor.map(_run_single_job, jobs))
 
     master_path = config.output_dir / "master_results.tsv"
     results.sort(key=lambda row: (float(row["true_mutation_rate"]), int(row["replicate"])))

@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--minimap2-threads", type=int, default=1)
     parser.add_argument("--minimap2-executable", default="minimap2")
-    parser.add_argument("--minimap2-preset", default="asm5")
+    parser.add_argument("--minimap2-preset", default="auto")
     parser.add_argument("--gc-content", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="Allow overwriting a mismatched run config.")

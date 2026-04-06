@@ -23,7 +23,7 @@ class SamMetrics:
     aligned_bases: int
     edit_distance: int
     query_bases: int
-    ani: float
+    ani: float | None
 
 
 def ensure_minimap2_available(executable: str = "minimap2") -> str:
@@ -58,6 +58,14 @@ def run_minimap2(
         raise RuntimeError(
             f"minimap2 failed with exit code {completed.returncode}: {completed.stderr.strip()}"
         )
+
+
+def choose_minimap2_preset(expected_divergence: float) -> str:
+    if expected_divergence <= 0.03:
+        return "asm5"
+    if expected_divergence < 0.10:
+        return "asm10"
+    return "asm20"
 
 
 def _aligned_bases_from_cigar(cigar: str) -> int:
@@ -113,7 +121,7 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
             query_bases += _query_bases_from_cigar(cigar)
             edit_distance += nm_value
 
-    ani = 0.0
+    ani = None
     if aligned_bases > 0:
         ani = max(0.0, 1.0 - (edit_distance / aligned_bases))
     return SamMetrics(
