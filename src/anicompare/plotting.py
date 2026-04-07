@@ -141,7 +141,7 @@ def _root_divergence_fit(values_x: list[float], values_y: list[float], k: int) -
     }
 
 
-def compute_regressions(input_tsv: Path) -> list[dict[str, object]]:
+def compute_regressions(input_tsv: Path, report_mode: str = "full") -> list[dict[str, object]]:
     rows = _load_master_table(input_tsv)
     full_rows = _load_full_master_rows(input_tsv)
     k = int(full_rows[0]["k"])
@@ -156,6 +156,8 @@ def compute_regressions(input_tsv: Path) -> list[dict[str, object]]:
         ("jaccard_similarity", "true_mutation_rate", "quadratic"),
         ("ref_jaccard_similarity", "true_mutation_rate", "quadratic"),
     ]
+    if report_mode == "observed":
+        specs = [spec for spec in specs if "true_mutation_rate" not in spec[:2]]
     regressions: list[dict[str, object]] = []
     for x_name, y_name, model_type in specs:
         pairs = [(float(row[x_name]), float(row[y_name])) for row in rows if not math.isnan(float(row[x_name])) and not math.isnan(float(row[y_name]))]
@@ -281,7 +283,7 @@ def _timing_summary(full_rows: list[dict[str, str]]) -> dict[str, object]:
     }
 
 
-def compute_correlations(input_tsv: Path) -> list[dict[str, object]]:
+def compute_correlations(input_tsv: Path, report_mode: str = "full") -> list[dict[str, object]]:
     rows = _load_master_table(input_tsv)
     comparisons = [
         ("true_mutation_rate", "minimap2_ani"),
@@ -294,6 +296,8 @@ def compute_correlations(input_tsv: Path) -> list[dict[str, object]]:
         ("minimap2_divergence", "ref_jaccard_similarity"),
         ("jaccard_similarity", "ref_jaccard_similarity"),
     ]
+    if report_mode == "observed":
+        comparisons = [pair for pair in comparisons if "true_mutation_rate" not in pair]
     output: list[dict[str, object]] = []
     for x_name, y_name in comparisons:
         pairs = [(row[x_name], row[y_name]) for row in rows if not math.isnan(row[x_name]) and not math.isnan(row[y_name])]
@@ -310,8 +314,8 @@ def compute_correlations(input_tsv: Path) -> list[dict[str, object]]:
     return output
 
 
-def write_correlations(input_tsv: Path, output_tsv: Path) -> list[dict[str, object]]:
-    correlations = compute_correlations(input_tsv)
+def write_correlations(input_tsv: Path, output_tsv: Path, report_mode: str = "full") -> list[dict[str, object]]:
+    correlations = compute_correlations(input_tsv, report_mode=report_mode)
     write_tsv(correlations, output_tsv, fieldnames=["x_metric", "y_metric", "pearson_r", "spearman_rho"])
     return correlations
 
@@ -750,7 +754,7 @@ def _write_svg_summary(
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def plot_master_table(input_tsv: Path, output_dir: Path) -> list[Path]:
+def plot_master_table(input_tsv: Path, output_dir: Path, report_mode: str = "full") -> list[Path]:
     rows = _load_master_table(input_tsv)
     reference = _reference_metrics(input_tsv)
     has_jaccard = any(not math.isnan(row["jaccard_similarity"]) for row in rows)
@@ -774,6 +778,11 @@ def plot_master_table(input_tsv: Path, output_dir: Path) -> list[Path]:
         {"kind": "scatter", "x": "ref_jaccard_similarity", "y": "true_mutation_rate"},
         {"kind": "scatter", "x": "ref_jaccard_similarity", "y": "minimap2_divergence"},
     ]
+    if report_mode == "observed":
+        plot_specs = [
+            spec for spec in plot_specs
+            if spec.get("x") != "true_mutation_rate" and spec.get("y") != "true_mutation_rate"
+        ]
     if has_jaccard and reference["analysis_mode"] != "reference_chunks":
         plot_specs.extend(
             [
@@ -817,6 +826,7 @@ def write_html_report(
     correlations: list[dict[str, object]],
     regressions: list[dict[str, object]],
     output_path: Path,
+    report_mode: str = "full",
 ) -> Path:
     rows = _load_master_table(input_tsv)
     full_rows = _load_full_master_rows(input_tsv)
@@ -977,6 +987,11 @@ def write_html_report(
             "colorBy": "minimap2_query_coverage",
         },
     ]
+    if report_mode == "observed":
+        plot_specs = [
+            spec for spec in plot_specs
+            if spec.get("x") != "true_mutation_rate" and spec.get("y") != "true_mutation_rate"
+        ]
     if has_jaccard and reference["analysis_mode"] != "reference_chunks":
         plot_specs[3:3] = [
             {
@@ -1108,6 +1123,56 @@ def write_html_report(
         ]
     )
 
+    intro_text = (
+        "This report summarizes the relationship between the true simulated mutation rate, ANI estimated from <code>minimap2</code> SAM alignments, and similarity estimated from k-mer conservation using Jaccard and ref-Jaccard coefficients."
+        if report_mode == "full"
+        else "This report summarizes the relationship between divergence estimated from <code>minimap2</code> SAM alignments, alignment coverage, and similarity estimated from k-mer conservation using Jaccard and ref-Jaccard coefficients."
+    )
+    jaccard_range_text = (
+        "N/A"
+        if math.isnan(summary["min_jaccard"]) or math.isnan(summary["max_jaccard"])
+        else f'{summary["min_jaccard"]:.4f} to {summary["max_jaccard"]:.4f}'
+    )
+    total_runtime_text = (
+        "N/A" if math.isnan(float(timing["total_runtime_seconds"])) else f'{float(timing["total_runtime_seconds"]):.1f}s'
+    )
+    total_minimap_text = (
+        "N/A" if math.isnan(float(timing["total_minimap_seconds"])) else f'{float(timing["total_minimap_seconds"]):.1f}s'
+    )
+    total_ref_jaccard_text = (
+        "N/A" if math.isnan(float(timing["total_ref_jaccard_seconds"])) else f'{float(timing["total_ref_jaccard_seconds"]):.1f}s'
+    )
+    mean_job_text = (
+        "N/A" if math.isnan(float(timing["mean_job_seconds"])) else f'{float(timing["mean_job_seconds"]):.2f}s'
+    )
+    summary_cards = [
+        f'<div class="stat"><span class="label">Runs</span><span class="value">{summary["rows"]}</span></div>',
+        f'<div class="stat"><span class="label">ANI range</span><span class="value">{summary["min_ani"]:.4f} to {summary["max_ani"]:.4f}</span></div>',
+        f'<div class="stat"><span class="label">DV range</span><span class="value">{summary["min_dv"]:.4f} to {summary["max_dv"]:.4f}</span></div>',
+        f'<div class="stat"><span class="label">Jaccard range</span><span class="value">{jaccard_range_text}</span></div>',
+        f'<div class="stat"><span class="label">ref-Jaccard range</span><span class="value">{summary["min_ref_jaccard"]:.4f} to {summary["max_ref_jaccard"]:.4f}</span></div>',
+        f'<div class="stat"><span class="label">k-mer length</span><span class="value">{summary["k"]}</span></div>',
+        f'<div class="stat"><span class="label">Observation unit</span><span class="value">{escape(observation_label)}</span></div>',
+        f'<div class="stat"><span class="label">Total runtime</span><span class="value">{total_runtime_text}</span></div>',
+        f'<div class="stat"><span class="label">Total minimap2 time</span><span class="value">{total_minimap_text}</span></div>',
+        f'<div class="stat"><span class="label">Total ref-Jaccard time</span><span class="value">{total_ref_jaccard_text}</span></div>',
+        f'<div class="stat"><span class="label">Mean job time</span><span class="value">{mean_job_text}</span></div>',
+    ]
+    if report_mode == "full":
+        summary_cards.insert(1, f'<div class="stat"><span class="label">Mutation rate range</span><span class="value">{summary["min_rate"]:.4f} to {summary["max_rate"]:.4f}</span></div>')
+
+    table_header_cells = [
+        "<th>Rate label</th>",
+        f"<th>{observation_label_title}</th>",
+        "<th>Reference label</th>",
+    ]
+    if report_mode == "full":
+        table_header_cells.append("<th>True mutation rate</th>")
+    table_header_cells.extend(["<th>minimap2 ANI</th>", "<th>Jaccard</th>", "<th>ref-Jaccard</th>"])
+    if report_mode == "full":
+        table_header_cells.extend(["<th>Realized substitutions</th>", "<th>Realized insertions</th>", "<th>Realized deletions</th>"])
+    table_headers = "\n              ".join(table_header_cells)
+
     table_rows = "\n".join(
         [
             (
@@ -1115,14 +1180,18 @@ def write_html_report(
                 f"<td>{escape(row['rate_label'])}</td>"
                 f"<td>{int(row['replicate'])}</td>"
                 f"<td>{escape(row.get('reference_label', ''))}</td>"
-                f"<td>{float(row['true_mutation_rate']):.6f}</td>"
-                f"<td>{'NA' if not row['minimap2_ani'].strip() else format(float(row['minimap2_ani']), '.6f')}</td>"
-                f"<td>{'N/A' if not row['jaccard_similarity'].strip() else format(float(row['jaccard_similarity']), '.6f')}</td>"
-                f"<td>{float(row['ref_jaccard_similarity']):.6f}</td>"
-                f"<td>{float(row['realized_substitution_rate']):.6f}</td>"
-                f"<td>{float(row['realized_insertion_rate']):.6f}</td>"
-                f"<td>{float(row['realized_deletion_rate']):.6f}</td>"
-                "</tr>"
+                + (f"<td>{float(row['true_mutation_rate']):.6f}</td>" if report_mode == "full" else "")
+                + f"<td>{'NA' if not row['minimap2_ani'].strip() else format(float(row['minimap2_ani']), '.6f')}</td>"
+                + f"<td>{'N/A' if not row['jaccard_similarity'].strip() else format(float(row['jaccard_similarity']), '.6f')}</td>"
+                + f"<td>{float(row['ref_jaccard_similarity']):.6f}</td>"
+                + (
+                    f"<td>{float(row['realized_substitution_rate']):.6f}</td>"
+                    f"<td>{float(row['realized_insertion_rate']):.6f}</td>"
+                    f"<td>{float(row['realized_deletion_rate']):.6f}</td>"
+                    if report_mode == "full"
+                    else ""
+                )
+                + "</tr>"
             )
             for row in full_rows
         ]
@@ -1332,20 +1401,9 @@ def write_html_report(
   <main>
     <section class="hero">
       <h1>anicompare report</h1>
-      <p>This report summarizes the relationship between the true simulated mutation rate, ANI estimated from <code>minimap2</code> SAM alignments, and similarity estimated from k-mer conservation using Jaccard and ref-Jaccard coefficients.</p>
+      <p>{intro_text}</p>
       <div class="stats">
-        <div class="stat"><span class="label">Runs</span><span class="value">{summary['rows']}</span></div>
-        <div class="stat"><span class="label">Mutation rate range</span><span class="value">{summary['min_rate']:.4f} to {summary['max_rate']:.4f}</span></div>
-        <div class="stat"><span class="label">ANI range</span><span class="value">{summary['min_ani']:.4f} to {summary['max_ani']:.4f}</span></div>
-        <div class="stat"><span class="label">DV range</span><span class="value">{summary['min_dv']:.4f} to {summary['max_dv']:.4f}</span></div>
-        <div class="stat"><span class="label">Jaccard range</span><span class="value">{'N/A' if math.isnan(summary['min_jaccard']) or math.isnan(summary['max_jaccard']) else f'{summary["min_jaccard"]:.4f} to {summary["max_jaccard"]:.4f}'}</span></div>
-        <div class="stat"><span class="label">ref-Jaccard range</span><span class="value">{summary['min_ref_jaccard']:.4f} to {summary['max_ref_jaccard']:.4f}</span></div>
-        <div class="stat"><span class="label">k-mer length</span><span class="value">{summary['k']}</span></div>
-        <div class="stat"><span class="label">Observation unit</span><span class="value">{escape(observation_label)}</span></div>
-        <div class="stat"><span class="label">Total runtime</span><span class="value">{'N/A' if math.isnan(float(timing['total_runtime_seconds'])) else f"{float(timing['total_runtime_seconds']):.1f}s"}</span></div>
-        <div class="stat"><span class="label">Total minimap2 time</span><span class="value">{'N/A' if math.isnan(float(timing['total_minimap_seconds'])) else f"{float(timing['total_minimap_seconds']):.1f}s"}</span></div>
-        <div class="stat"><span class="label">Total ref-Jaccard time</span><span class="value">{'N/A' if math.isnan(float(timing['total_ref_jaccard_seconds'])) else f"{float(timing['total_ref_jaccard_seconds']):.1f}s"}</span></div>
-        <div class="stat"><span class="label">Mean job time</span><span class="value">{'N/A' if math.isnan(float(timing['mean_job_seconds'])) else f"{float(timing['mean_job_seconds']):.2f}s"}</span></div>
+        {"".join(summary_cards)}
       </div>
     </section>
 
@@ -1415,16 +1473,7 @@ def write_html_report(
         <table>
           <thead>
             <tr>
-              <th>Rate label</th>
-              <th>{observation_label_title}</th>
-              <th>Reference label</th>
-              <th>True rate</th>
-              <th>minimap2 ANI</th>
-              <th>Jaccard</th>
-              <th>ref-Jaccard</th>
-              <th>Realized substitutions</th>
-              <th>Realized insertions</th>
-              <th>Realized deletions</th>
+              {table_headers}
             </tr>
           </thead>
           <tbody>

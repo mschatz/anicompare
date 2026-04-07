@@ -37,4 +37,5 @@ python3 -m anicompare.cli_run_experiment \
 
 python3 -m anicompare.cli_plot_results \
   --input "$OUTPUT_DIR/master_results.tsv" \
-  --output-dir "$OUTPUT_DIR/plots"
+  --output-dir "$OUTPUT_DIR/plots" \
+  --report-mode observed
