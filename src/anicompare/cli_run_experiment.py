@@ -15,6 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
     source_group.add_argument("--simulate-length", type=int, help="Simulate a random reference genome of this length.")
     parser.add_argument("--output-dir", type=Path, required=True, help="Results directory.")
     parser.add_argument("--replicates", type=int, default=3)
+    parser.add_argument("--analysis-mode", choices=["whole_reference", "reference_chunks"], default="whole_reference")
+    parser.add_argument("--chunk-length", type=int, default=100000, help="Reference chunk length for chunked analysis mode.")
     parser.add_argument("--mutation-rates", type=float, nargs="+", default=DEFAULT_MUTATION_RATES)
     parser.add_argument("--substitution-scale", type=float, default=1.0)
     parser.add_argument("--insertion-scale", type=float, default=0.0)
@@ -39,6 +41,8 @@ def main() -> None:
         reference_fasta=args.reference_fasta,
         simulate_length=args.simulate_length,
         replicates=args.replicates,
+        analysis_mode=args.analysis_mode,
+        chunk_length=args.chunk_length,
         mutation_rates=tuple(args.mutation_rates),
         substitution_scale=args.substitution_scale,
         insertion_scale=args.insertion_scale,

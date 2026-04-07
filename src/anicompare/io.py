@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,11 @@ def read_fasta(path: Path) -> list[FastaRecord]:
     records: list[FastaRecord] = []
     header: str | None = None
     chunks: list[str] = []
-    with path.open("r", encoding="utf-8") as handle:
+    if path.suffix == ".gz":
+        handle_context = gzip.open(path, "rt", encoding="utf-8")
+    else:
+        handle_context = path.open("r", encoding="utf-8")
+    with handle_context as handle:
         for raw_line in handle:
             line = raw_line.strip()
             if not line:

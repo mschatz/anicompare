@@ -160,30 +160,33 @@ def compute_regressions(input_tsv: Path) -> list[dict[str, object]]:
         pairs = [(float(row[x_name]), float(row[y_name])) for row in rows if not math.isnan(float(row[x_name])) and not math.isnan(float(row[y_name]))]
         values_x = [pair[0] for pair in pairs]
         values_y = [pair[1] for pair in pairs]
-        model = _linear_fit(values_x, values_y) if model_type == "linear" else _quadratic_fit(values_x, values_y)
-        regressions.append(
-            {
-                "x_metric": x_name,
-                "y_metric": y_name,
-                **model,
-            }
-        )
+        try:
+            model = _linear_fit(values_x, values_y) if model_type == "linear" else _quadratic_fit(values_x, values_y)
+        except ValueError:
+            continue
+        regressions.append({"x_metric": x_name, "y_metric": y_name, **model})
         if y_name in {"jaccard_similarity", "ref_jaccard_similarity"}:
-            regressions.append(
-                {
-                    "x_metric": x_name,
-                    "y_metric": y_name,
-                    **_root_jaccard_fit(values_x, values_y, k),
-                }
-            )
+            try:
+                regressions.append(
+                    {
+                        "x_metric": x_name,
+                        "y_metric": y_name,
+                        **_root_jaccard_fit(values_x, values_y, k),
+                    }
+                )
+            except ValueError:
+                pass
         if x_name in {"jaccard_similarity", "ref_jaccard_similarity"} and y_name == "true_mutation_rate":
-            regressions.append(
-                {
-                    "x_metric": x_name,
-                    "y_metric": y_name,
-                    **_root_divergence_fit(values_x, values_y, k),
-                }
-            )
+            try:
+                regressions.append(
+                    {
+                        "x_metric": x_name,
+                        "y_metric": y_name,
+                        **_root_divergence_fit(values_x, values_y, k),
+                    }
+                )
+            except ValueError:
+                pass
     return regressions
 
 
@@ -207,6 +210,8 @@ def _reference_metrics(input_tsv: Path) -> dict[str, object]:
         "length": total_length,
         "gc_fraction": gc_fraction,
         "reference_path": str(reference_path),
+        "analysis_mode": config.get("analysis_mode", "whole_reference"),
+        "chunk_length": config.get("chunk_length", ""),
     }
 
 
@@ -214,6 +219,7 @@ def _load_master_table(path: Path) -> list[dict[str, float]]:
     rows: list[dict[str, float | str]] = []
     for row in read_tsv(path):
         minimap2_ani = row["minimap2_ani"].strip()
+        jaccard = row["jaccard_similarity"].strip()
         rows.append(
             {
                 "rate_label": row["rate_label"],
@@ -222,7 +228,7 @@ def _load_master_table(path: Path) -> list[dict[str, float]]:
                 "minimap2_ani": float(minimap2_ani) if minimap2_ani else math.nan,
                 "minimap2_dv": float(row["minimap2_dv"]) if row["minimap2_dv"].strip() else math.nan,
                 "minimap2_query_coverage": float(row["minimap2_query_coverage"]),
-                "jaccard_similarity": float(row["jaccard_similarity"]),
+                "jaccard_similarity": float(jaccard) if jaccard else math.nan,
                 "ref_jaccard_similarity": float(row["ref_jaccard_similarity"]),
             }
         )
@@ -344,7 +350,7 @@ def _tooltip_text(row: dict[str, float | str], x_name: str, y_name: str) -> str:
         f"{y_name}: {y_value:.6f}\n"
         f"minimap2_ani: {row['minimap2_ani']:.6f}\n"
         f"minimap2_dv: {row['minimap2_dv']:.6f}\n"
-        f"minimap2_query_coverage: {row['minimap2_query_coverage']:.6f}\n"
+        f"minimap2_chunk_coverage: {row['minimap2_query_coverage']:.6f}\n"
         f"jaccard_similarity: {row['jaccard_similarity']:.6f}\n"
         f"ref_jaccard_similarity: {row['ref_jaccard_similarity']:.6f}"
     )
@@ -572,7 +578,7 @@ def _write_svg_summary(
         *mean_points,
         (
             f'<text x="{plot_right}" y="{plot_top + 24}" text-anchor="end" font-family="sans-serif" '
-            f'font-size="18" fill="#4d5c70">Point = mean across replicates; bar = min to max</text>'
+            f'font-size="18" fill="#4d5c70">Point = mean across observations; bar = min to max</text>'
         ),
         "</svg>",
     ]
@@ -581,6 +587,8 @@ def _write_svg_summary(
 
 def plot_master_table(input_tsv: Path, output_dir: Path) -> list[Path]:
     rows = _load_master_table(input_tsv)
+    reference = _reference_metrics(input_tsv)
+    has_jaccard = any(not math.isnan(row["jaccard_similarity"]) for row in rows)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -593,14 +601,19 @@ def plot_master_table(input_tsv: Path, output_dir: Path) -> list[Path]:
         ("true_mutation_rate", "minimap2_ani"),
         ("true_mutation_rate", "minimap2_dv"),
         ("true_mutation_rate", "minimap2_query_coverage"),
-        ("true_mutation_rate", "jaccard_similarity"),
         ("true_mutation_rate", "ref_jaccard_similarity"),
-        ("minimap2_ani", "jaccard_similarity"),
         ("minimap2_ani", "ref_jaccard_similarity"),
-        ("jaccard_similarity", "ref_jaccard_similarity"),
-        ("jaccard_similarity", "true_mutation_rate"),
         ("ref_jaccard_similarity", "true_mutation_rate"),
     ]
+    if has_jaccard and reference["analysis_mode"] != "reference_chunks":
+        plot_specs.extend(
+            [
+                ("true_mutation_rate", "jaccard_similarity"),
+                ("minimap2_ani", "jaccard_similarity"),
+                ("jaccard_similarity", "ref_jaccard_similarity"),
+                ("jaccard_similarity", "true_mutation_rate"),
+            ]
+        )
     for x_name, y_name in plot_specs:
         use_summary_plot = y_name == "minimap2_query_coverage"
         if plt is not None and not use_summary_plot:
@@ -633,6 +646,9 @@ def write_html_report(
     rows = _load_master_table(input_tsv)
     full_rows = _load_full_master_rows(input_tsv)
     reference = _reference_metrics(input_tsv)
+    observation_label = "chunk" if reference["analysis_mode"] == "reference_chunks" else "replicate"
+    observation_label_title = observation_label.title()
+    has_jaccard = any(not math.isnan(row["jaccard_similarity"]) for row in rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     summary = {
@@ -643,8 +659,8 @@ def write_html_report(
         "max_ani": max(row["minimap2_ani"] for row in rows),
         "min_dv": min(row["minimap2_dv"] for row in rows if not math.isnan(row["minimap2_dv"])),
         "max_dv": max(row["minimap2_dv"] for row in rows if not math.isnan(row["minimap2_dv"])),
-        "min_jaccard": min(row["jaccard_similarity"] for row in rows),
-        "max_jaccard": max(row["jaccard_similarity"] for row in rows),
+        "min_jaccard": min((row["jaccard_similarity"] for row in rows if not math.isnan(row["jaccard_similarity"])), default=math.nan),
+        "max_jaccard": max((row["jaccard_similarity"] for row in rows if not math.isnan(row["jaccard_similarity"])), default=math.nan),
         "min_ref_jaccard": min(row["ref_jaccard_similarity"] for row in rows),
         "max_ref_jaccard": max(row["ref_jaccard_similarity"] for row in rows),
         "k": full_rows[0]["k"],
@@ -682,28 +698,14 @@ def write_html_report(
         },
         {
             "id": "plot-coverage-vs-rate",
-            "title": "minimap2_query_coverage vs true_mutation_rate",
+            "title": "minimap2_chunk_coverage vs true_mutation_rate",
             "kind": "summary",
             "x": "true_mutation_rate",
             "y": "minimap2_query_coverage",
             "xDomain": [0.0, 0.20],
             "xLabel": "true_mutation_rate",
-            "yLabel": "minimap2_query_coverage",
+            "yLabel": "minimap2_chunk_coverage",
             "download": "true_mutation_rate_vs_minimap2_query_coverage.svg",
-        },
-        {
-            "id": "plot-jaccard-vs-rate",
-            "title": "jaccard_similarity vs true_mutation_rate",
-            "kind": "scatter",
-            "x": "true_mutation_rate",
-            "y": "jaccard_similarity",
-            "xDomain": [0.0, 0.20],
-            "yDomain": [0.0, 1.0],
-            "xLabel": "true_mutation_rate",
-            "yLabel": "jaccard_similarity",
-            "download": "true_mutation_rate_vs_jaccard_similarity.svg",
-            "regressionKey": "true_mutation_rate|jaccard_similarity",
-            "legendPosition": "right",
         },
         {
             "id": "plot-ref-jaccard-vs-rate",
@@ -720,20 +722,6 @@ def write_html_report(
             "legendPosition": "right",
         },
         {
-            "id": "plot-jaccard-vs-ani",
-            "title": "jaccard_similarity vs minimap2_ani",
-            "kind": "scatter",
-            "x": "minimap2_ani",
-            "y": "jaccard_similarity",
-            "xDomain": [0.75, 1.0],
-            "yDomain": [0.0, 1.0],
-            "xLabel": "minimap2_ani",
-            "yLabel": "jaccard_similarity",
-            "download": "minimap2_ani_vs_jaccard_similarity.svg",
-            "regressionKey": "minimap2_ani|jaccard_similarity",
-            "legendPosition": "left",
-        },
-        {
             "id": "plot-ref-jaccard-vs-ani",
             "title": "ref_jaccard_similarity vs minimap2_ani",
             "kind": "scatter",
@@ -746,36 +734,6 @@ def write_html_report(
             "download": "minimap2_ani_vs_ref_jaccard_similarity.svg",
             "regressionKey": "minimap2_ani|ref_jaccard_similarity",
             "legendPosition": "left",
-        },
-        {
-            "id": "plot-jaccard-vs-ref-jaccard",
-            "title": "ref_jaccard_similarity vs jaccard_similarity",
-            "kind": "scatter",
-            "x": "jaccard_similarity",
-            "y": "ref_jaccard_similarity",
-            "xDomain": [0.0, 1.0],
-            "yDomain": [0.0, 1.0],
-            "xLabel": "jaccard_similarity",
-            "yLabel": "ref_jaccard_similarity",
-            "download": "jaccard_similarity_vs_ref_jaccard_similarity.svg",
-            "legendPosition": "right",
-            "identityLine": True,
-            "theoryCurve": "ref_from_jaccard",
-            "legendPosition": "left",
-        },
-        {
-            "id": "plot-divergence-vs-jaccard",
-            "title": "true_mutation_rate vs jaccard_similarity",
-            "kind": "scatter",
-            "x": "jaccard_similarity",
-            "y": "true_mutation_rate",
-            "xDomain": [0.0, 1.0],
-            "yDomain": [0.0, 0.20],
-            "xLabel": "jaccard_similarity",
-            "yLabel": "nucleotide_divergence",
-            "download": "jaccard_similarity_vs_true_mutation_rate.svg",
-            "regressionKey": "jaccard_similarity|true_mutation_rate",
-            "legendPosition": "right",
         },
         {
             "id": "plot-divergence-vs-ref-jaccard",
@@ -792,6 +750,68 @@ def write_html_report(
             "legendPosition": "right",
         },
     ]
+    if has_jaccard and reference["analysis_mode"] != "reference_chunks":
+        plot_specs[3:3] = [
+            {
+                "id": "plot-jaccard-vs-rate",
+                "title": "jaccard_similarity vs true_mutation_rate",
+                "kind": "scatter",
+                "x": "true_mutation_rate",
+                "y": "jaccard_similarity",
+                "xDomain": [0.0, 0.20],
+                "yDomain": [0.0, 1.0],
+                "xLabel": "true_mutation_rate",
+                "yLabel": "jaccard_similarity",
+                "download": "true_mutation_rate_vs_jaccard_similarity.svg",
+                "regressionKey": "true_mutation_rate|jaccard_similarity",
+                "legendPosition": "right",
+            }
+        ]
+        plot_specs[5:5] = [
+            {
+                "id": "plot-jaccard-vs-ani",
+                "title": "jaccard_similarity vs minimap2_ani",
+                "kind": "scatter",
+                "x": "minimap2_ani",
+                "y": "jaccard_similarity",
+                "xDomain": [0.75, 1.0],
+                "yDomain": [0.0, 1.0],
+                "xLabel": "minimap2_ani",
+                "yLabel": "jaccard_similarity",
+                "download": "minimap2_ani_vs_jaccard_similarity.svg",
+                "regressionKey": "minimap2_ani|jaccard_similarity",
+                "legendPosition": "left",
+            },
+            {
+                "id": "plot-jaccard-vs-ref-jaccard",
+                "title": "ref_jaccard_similarity vs jaccard_similarity",
+                "kind": "scatter",
+                "x": "jaccard_similarity",
+                "y": "ref_jaccard_similarity",
+                "xDomain": [0.0, 1.0],
+                "yDomain": [0.0, 1.0],
+                "xLabel": "jaccard_similarity",
+                "yLabel": "ref_jaccard_similarity",
+                "download": "jaccard_similarity_vs_ref_jaccard_similarity.svg",
+                "legendPosition": "left",
+                "identityLine": True,
+                "theoryCurve": "ref_from_jaccard",
+            },
+            {
+                "id": "plot-divergence-vs-jaccard",
+                "title": "true_mutation_rate vs jaccard_similarity",
+                "kind": "scatter",
+                "x": "jaccard_similarity",
+                "y": "true_mutation_rate",
+                "xDomain": [0.0, 1.0],
+                "yDomain": [0.0, 0.20],
+                "xLabel": "jaccard_similarity",
+                "yLabel": "nucleotide_divergence",
+                "download": "jaccard_similarity_vs_true_mutation_rate.svg",
+                "regressionKey": "jaccard_similarity|true_mutation_rate",
+                "legendPosition": "right",
+            },
+        ]
 
     regression_map: dict[str, list[dict[str, object]]] = {}
     for row in regressions:
@@ -832,11 +852,14 @@ def write_html_report(
             {
                 "rate_label": row["rate_label"],
                 "replicate": int(row["replicate"]),
+                "reference_label": row.get("reference_label", ""),
+                "chunk_start": int(row.get("chunk_start", "0") or 0),
+                "chunk_end": int(row.get("chunk_end", "0") or 0),
                 "true_mutation_rate": float(row["true_mutation_rate"]),
                 "minimap2_ani": None if not minimap2_ani else float(minimap2_ani),
                 "minimap2_dv": None if not row["minimap2_dv"].strip() else float(row["minimap2_dv"]),
                 "minimap2_query_coverage": float(row["minimap2_query_coverage"]),
-                "jaccard_similarity": float(row["jaccard_similarity"]),
+                "jaccard_similarity": None if not row["jaccard_similarity"].strip() else float(row["jaccard_similarity"]),
                 "ref_jaccard_similarity": float(row["ref_jaccard_similarity"]),
                 "minimap2_preset": row["minimap2_preset"],
             }
@@ -862,9 +885,10 @@ def write_html_report(
                 "<tr>"
                 f"<td>{escape(row['rate_label'])}</td>"
                 f"<td>{int(row['replicate'])}</td>"
+                f"<td>{escape(row.get('reference_label', ''))}</td>"
                 f"<td>{float(row['true_mutation_rate']):.6f}</td>"
                 f"<td>{'NA' if not row['minimap2_ani'].strip() else format(float(row['minimap2_ani']), '.6f')}</td>"
-                f"<td>{float(row['jaccard_similarity']):.6f}</td>"
+                f"<td>{'N/A' if not row['jaccard_similarity'].strip() else format(float(row['jaccard_similarity']), '.6f')}</td>"
                 f"<td>{float(row['ref_jaccard_similarity']):.6f}</td>"
                 f"<td>{float(row['realized_substitution_rate']):.6f}</td>"
                 f"<td>{float(row['realized_insertion_rate']):.6f}</td>"
@@ -1047,9 +1071,10 @@ def write_html_report(
         <div class="stat"><span class="label">Mutation rate range</span><span class="value">{summary['min_rate']:.4f} to {summary['max_rate']:.4f}</span></div>
         <div class="stat"><span class="label">ANI range</span><span class="value">{summary['min_ani']:.4f} to {summary['max_ani']:.4f}</span></div>
         <div class="stat"><span class="label">DV range</span><span class="value">{summary['min_dv']:.4f} to {summary['max_dv']:.4f}</span></div>
-        <div class="stat"><span class="label">Jaccard range</span><span class="value">{summary['min_jaccard']:.4f} to {summary['max_jaccard']:.4f}</span></div>
+        <div class="stat"><span class="label">Jaccard range</span><span class="value">{'N/A' if math.isnan(summary['min_jaccard']) or math.isnan(summary['max_jaccard']) else f'{summary["min_jaccard"]:.4f} to {summary["max_jaccard"]:.4f}'}</span></div>
         <div class="stat"><span class="label">ref-Jaccard range</span><span class="value">{summary['min_ref_jaccard']:.4f} to {summary['max_ref_jaccard']:.4f}</span></div>
         <div class="stat"><span class="label">k-mer length</span><span class="value">{summary['k']}</span></div>
+        <div class="stat"><span class="label">Observation unit</span><span class="value">{escape(observation_label)}</span></div>
       </div>
     </section>
 
@@ -1061,6 +1086,8 @@ def write_html_report(
         <div class="stat"><span class="label">Contigs</span><span class="value">{reference['contigs']}</span></div>
         <div class="stat"><span class="label">Total length</span><span class="value">{reference['length']}</span></div>
         <div class="stat"><span class="label">GC fraction</span><span class="value">{reference['gc_fraction']:.4f}</span></div>
+        <div class="stat"><span class="label">Analysis mode</span><span class="value">{escape(str(reference['analysis_mode']))}</span></div>
+        <div class="stat"><span class="label">Chunk length</span><span class="value">{escape(str(reference['chunk_length']))}</span></div>
       </div>
       <p>Reference FASTA: <code>{escape(str(reference['reference_path']))}</code></p>
     </section>
@@ -1098,7 +1125,8 @@ def write_html_report(
           <thead>
             <tr>
               <th>Rate label</th>
-              <th>Replicate</th>
+              <th>{observation_label_title}</th>
+              <th>Reference label</th>
               <th>True rate</th>
               <th>minimap2 ANI</th>
               <th>Jaccard</th>
@@ -1121,6 +1149,7 @@ def write_html_report(
     const reportData = {json.dumps(d3_rows)};
     const plotSpecs = {json.dumps(plot_specs)};
     const regressionMap = {json.dumps(regression_map)};
+    const observationLabel = {json.dumps(observation_label)};
 
     const tooltip = d3.select("#chart-tooltip");
 
@@ -1188,12 +1217,15 @@ def write_html_report(
         .attr("fill-opacity", 0.85)
         .on("mousemove", (event, d) => showTooltip(event, [
           `rate_label: ${{d.rate_label}}`,
-          `replicate: ${{d.replicate}}`,
+          `${{observationLabel}}: ${{d.replicate}}`,
+          `reference_label: ${{d.reference_label || "NA"}}`,
+          `chunk_start: ${{d.chunk_start || "NA"}}`,
+          `chunk_end: ${{d.chunk_end || "NA"}}`,
           `${{spec.x}}: ${{formatValue(d[spec.x])}}`,
           `${{spec.y}}: ${{formatValue(d[spec.y])}}`,
           `minimap2_ani: ${{formatValue(d.minimap2_ani)}}`,
           `minimap2_dv: ${{formatValue(d.minimap2_dv)}}`,
-          `minimap2_query_coverage: ${{formatValue(d.minimap2_query_coverage)}}`,
+          `minimap2_chunk_coverage: ${{formatValue(d.minimap2_query_coverage)}}`,
           `jaccard_similarity: ${{formatValue(d.jaccard_similarity)}}`,
           `ref_jaccard_similarity: ${{formatValue(d.ref_jaccard_similarity)}}`,
           `minimap2_preset: ${{d.minimap2_preset}}`
@@ -1420,7 +1452,7 @@ def write_html_report(
           `mean_${{spec.y}}: ${{formatValue(d.mean)}}`,
           `min_${{spec.y}}: ${{formatValue(d.min)}}`,
           `max_${{spec.y}}: ${{formatValue(d.max)}}`,
-          `replicates: ${{d.count}}`
+          `${{observationLabel}}s: ${{d.count}}`
         ]))
         .on("mouseleave", hideTooltip);
 

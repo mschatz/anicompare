@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import re
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ class SamMetrics:
     aligned_bases: int
     edit_distance: int
     query_bases: int
+    reference_covered_bases: int
     ani: float | None
     divergence_estimate: float | None
     divergence_source: str | None
@@ -88,6 +90,15 @@ def _query_bases_from_cigar(cigar: str) -> int:
     return total
 
 
+def _reference_bases_from_cigar(cigar: str) -> int:
+    total = 0
+    for length_text, op in _CIGAR_PATTERN.findall(cigar):
+        length = int(length_text)
+        if op in {"M", "=", "X", "D", "N"}:
+            total += length
+    return total
+
+
 def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
     mapped_records = 0
     aligned_bases = 0
@@ -96,8 +107,14 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
     weighted_divergence = 0.0
     divergence_weight_bases = 0
     divergence_source: str | None = None
+    reference_intervals: dict[str, list[tuple[int, int]]] = {}
 
-    with sam_path.open("r", encoding="utf-8") as handle:
+    opener = gzip.open if sam_path.suffix == ".gz" else Path.open
+    if sam_path.suffix == ".gz":
+        handle_context = opener(sam_path, "rt", encoding="utf-8")
+    else:
+        handle_context = sam_path.open("r", encoding="utf-8")
+    with handle_context as handle:
         for line in handle:
             if not line or line.startswith("@"):
                 continue
@@ -113,6 +130,8 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
                 continue
 
             cigar = fields[5]
+            reference_name = fields[2]
+            reference_start = int(fields[3]) - 1
             nm_value = None
             divergence_value = None
             local_source = None
@@ -129,10 +148,15 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
                 continue
 
             local_aligned_bases = _aligned_bases_from_cigar(cigar)
+            reference_span = _reference_bases_from_cigar(cigar)
             mapped_records += 1
             aligned_bases += local_aligned_bases
             query_bases += _query_bases_from_cigar(cigar)
             edit_distance += nm_value
+            if reference_span > 0:
+                reference_intervals.setdefault(reference_name, []).append(
+                    (reference_start, reference_start + reference_span)
+                )
             if divergence_value is not None and local_aligned_bases > 0:
                 weighted_divergence += divergence_value * local_aligned_bases
                 divergence_weight_bases += local_aligned_bases
@@ -145,11 +169,21 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
     divergence_estimate = None
     if divergence_weight_bases > 0:
         divergence_estimate = weighted_divergence / divergence_weight_bases
+    reference_covered_bases = 0
+    for intervals in reference_intervals.values():
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(intervals):
+            if not merged or start > merged[-1][1]:
+                merged.append((start, end))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        reference_covered_bases += sum(end - start for start, end in merged)
     return SamMetrics(
         mapped_records=mapped_records,
         aligned_bases=aligned_bases,
         edit_distance=edit_distance,
         query_bases=query_bases,
+        reference_covered_bases=reference_covered_bases,
         ani=ani,
         divergence_estimate=divergence_estimate,
         divergence_source=divergence_source,
