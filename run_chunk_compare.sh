@@ -32,6 +32,7 @@ python3 -m anicompare.cli_run_experiment \
   --workers 4 \
   --minimap2-threads 2 \
   --minimap2-executable "$MINIMAP2_EXECUTABLE" \
+  --minimap2-preset asm20 \
   --force
 
 python3 -m anicompare.cli_plot_results \

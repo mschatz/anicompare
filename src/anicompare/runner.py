@@ -464,6 +464,13 @@ def _parse_optional_float(value: str) -> float | None:
     return float(stripped)
 
 
+def _effective_expected_divergence(job: dict[str, object]) -> float:
+    override = job.get("true_mutation_rate_override")
+    if override is not None:
+        return float(override)
+    return float(job["rate"])
+
+
 def _read_cached_summary(summary_path: Path) -> dict[str, object] | None:
     cached = _read_single_tsv_row(summary_path)
     if cached is None:
@@ -784,7 +791,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
     if sam_source_path is None:
         preset = str(job["minimap2_preset"])
         if preset == "auto":
-            preset = choose_minimap2_preset(float(job["rate"]))
+            preset = choose_minimap2_preset(_effective_expected_divergence(job))
         legacy_sam_path = _legacy_sam_path(replicate_dir)
         minimap2_alignment_start = time.perf_counter()
         run_minimap2(
@@ -801,7 +808,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
     else:
         preset = str(job["minimap2_preset"])
         if preset == "auto":
-            preset = choose_minimap2_preset(float(job["rate"]))
+            preset = choose_minimap2_preset(_effective_expected_divergence(job))
         _write_log(log_path, ["Reused existing compressed SAM"])
 
     cached_metrics = _read_single_tsv_row(minimap_metrics_path)
