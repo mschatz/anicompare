@@ -152,6 +152,7 @@ def compute_regressions(input_tsv: Path) -> list[dict[str, object]]:
         ("true_mutation_rate", "ref_jaccard_similarity", "quadratic"),
         ("minimap2_ani", "jaccard_similarity", "quadratic"),
         ("minimap2_ani", "ref_jaccard_similarity", "quadratic"),
+        ("ref_jaccard_similarity", "minimap2_divergence", "quadratic"),
         ("jaccard_similarity", "true_mutation_rate", "quadratic"),
         ("ref_jaccard_similarity", "true_mutation_rate", "quadratic"),
     ]
@@ -176,7 +177,7 @@ def compute_regressions(input_tsv: Path) -> list[dict[str, object]]:
                 )
             except ValueError:
                 pass
-        if x_name in {"jaccard_similarity", "ref_jaccard_similarity"} and y_name == "true_mutation_rate":
+        if x_name in {"jaccard_similarity", "ref_jaccard_similarity"} and y_name in {"true_mutation_rate", "minimap2_divergence"}:
             try:
                 regressions.append(
                     {
@@ -226,6 +227,7 @@ def _load_master_table(path: Path) -> list[dict[str, float]]:
                 "replicate": row["replicate"],
                 "true_mutation_rate": float(row["true_mutation_rate"]),
                 "minimap2_ani": float(minimap2_ani) if minimap2_ani else math.nan,
+                "minimap2_divergence": 1.0 - float(minimap2_ani) if minimap2_ani else math.nan,
                 "minimap2_dv": float(row["minimap2_dv"]) if row["minimap2_dv"].strip() else math.nan,
                 "minimap2_query_coverage": float(row["minimap2_query_coverage"]),
                 "jaccard_similarity": float(jaccard) if jaccard else math.nan,
@@ -289,6 +291,7 @@ def compute_correlations(input_tsv: Path) -> list[dict[str, object]]:
         ("true_mutation_rate", "ref_jaccard_similarity"),
         ("minimap2_ani", "jaccard_similarity"),
         ("minimap2_ani", "ref_jaccard_similarity"),
+        ("minimap2_divergence", "ref_jaccard_similarity"),
         ("jaccard_similarity", "ref_jaccard_similarity"),
     ]
     output: list[dict[str, object]] = []
@@ -384,11 +387,17 @@ def _tooltip_text(row: dict[str, float | str], x_name: str, y_name: str) -> str:
         f"{x_name}: {x_value:.6f}\n"
         f"{y_name}: {y_value:.6f}\n"
         f"minimap2_ani: {row['minimap2_ani']:.6f}\n"
+        f"minimap2_divergence: {row['minimap2_divergence']:.6f}\n"
         f"minimap2_dv: {row['minimap2_dv']:.6f}\n"
         f"minimap2_chunk_coverage: {row['minimap2_query_coverage']:.6f}\n"
         f"jaccard_similarity: {row['jaccard_similarity']:.6f}\n"
         f"ref_jaccard_similarity: {row['ref_jaccard_similarity']:.6f}"
     )
+
+
+def _should_color_by_coverage(x_name: str, y_name: str) -> bool:
+    minimap_metrics = {"minimap2_ani", "minimap2_dv", "minimap2_divergence"}
+    return x_name in minimap_metrics or y_name in minimap_metrics
 
 
 def _write_svg_scatter(rows: list[dict[str, float | str]], x_name: str, y_name: str, output_path: Path) -> None:
@@ -418,13 +427,21 @@ def _write_svg_scatter(rows: list[dict[str, float | str]], x_name: str, y_name: 
     plot_top = top
     plot_bottom = height - bottom
 
+    color_by = "minimap2_query_coverage" if _should_color_by_coverage(x_name, y_name) else None
     points: list[str] = []
     for row in filtered_rows:
         cx = _scale_value(float(row[x_name]), x_min, x_max, plot_left, plot_right)
         cy = _scale_value(float(row[y_name]), y_min, y_max, plot_bottom, plot_top)
         tooltip = escape(_tooltip_text(row, x_name, y_name))
+        fill = "#1f77b4"
+        if color_by is not None and not math.isnan(float(row[color_by])):
+            coverage = max(0.0, min(1.0, float(row[color_by])))
+            red = int(round((1.0 - coverage) * 220 + coverage * 31))
+            green = int(round((1.0 - coverage) * 98 + coverage * 119))
+            blue = int(round((1.0 - coverage) * 98 + coverage * 180))
+            fill = f"#{red:02x}{green:02x}{blue:02x}"
         points.append(
-            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="7" fill="#1f77b4" fill-opacity="0.8"><title>{tooltip}</title></circle>'
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="7" fill="{fill}" fill-opacity="0.8"><title>{tooltip}</title></circle>'
         )
 
     x_ticks: list[str] = []
@@ -472,6 +489,119 @@ def _write_svg_scatter(rows: list[dict[str, float | str]], x_name: str, y_name: 
             f'font-size="24" transform="rotate(-90 34 {height / 2:.0f})">{escape(y_name)}</text>'
         ),
         *points,
+        "</svg>",
+    ]
+    if color_by is not None:
+        legend_x = plot_right - 170
+        legend_y = plot_top + 20
+        gradient_id = "coverage-gradient"
+        legend = [
+            f'<defs><linearGradient id="{gradient_id}" x1="0%" y1="100%" x2="0%" y2="0%">'
+            '<stop offset="0%" stop-color="#dc6262" />'
+            '<stop offset="100%" stop-color="#1f77b4" />'
+            '</linearGradient></defs>',
+            f'<rect x="{legend_x}" y="{legend_y}" width="18" height="140" fill="url(#{gradient_id})" stroke="#999" stroke-width="1" />',
+            f'<text x="{legend_x + 28}" y="{legend_y + 6}" font-family="sans-serif" font-size="18">chunk coverage</text>',
+            f'<text x="{legend_x + 28}" y="{legend_y + 24}" font-family="sans-serif" font-size="16">1.0</text>',
+            f'<text x="{legend_x + 28}" y="{legend_y + 140}" font-family="sans-serif" font-size="16">0.0</text>',
+        ]
+        lines = lines[:-1] + legend + [lines[-1]]
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_svg_histogram(
+    rows: list[dict[str, float | str]],
+    field_name: str,
+    output_path: Path,
+    x_domain: tuple[float, float] | None = None,
+    bins: int = 20,
+) -> None:
+    width = 1100
+    height = 820
+    left = 130
+    right = 60
+    top = 70
+    bottom = 120
+
+    values = [float(row[field_name]) for row in rows if not math.isnan(float(row[field_name]))]
+    if not values:
+        raise ValueError(f"No histogram values for {field_name}")
+    if x_domain is None:
+        x_min, x_max, x_step = _nice_axis_bounds(min(values), max(values))
+    else:
+        x_min, x_max = x_domain
+        _tmp_min, _tmp_max, x_step = _nice_axis_bounds(x_min, x_max)
+        x_min, x_max = _tmp_min, _tmp_max
+    if x_max <= x_min:
+        x_max = x_min + 1.0
+    bin_width = (x_max - x_min) / bins
+    counts = [0] * bins
+    for value in values:
+        if value < x_min or value > x_max:
+            continue
+        index = min(bins - 1, int((value - x_min) / bin_width))
+        counts[index] += 1
+    y_min, y_max, y_step = _nice_axis_bounds(0.0, float(max(counts) if counts else 1))
+
+    plot_left = left
+    plot_right = width - right
+    plot_top = top
+    plot_bottom = height - bottom
+    plot_width = plot_right - plot_left
+
+    x_ticks: list[str] = []
+    current_x = x_min
+    while current_x <= x_max + (x_step / 10):
+        x_pos = _scale_value(current_x, x_min, x_max, plot_left, plot_right)
+        x_ticks.append(
+            "\n".join(
+                [
+                    f'<line x1="{x_pos:.2f}" y1="{plot_bottom}" x2="{x_pos:.2f}" y2="{plot_top}" stroke="#d6d6d6" stroke-width="1" />',
+                    f'<line x1="{x_pos:.2f}" y1="{plot_bottom}" x2="{x_pos:.2f}" y2="{plot_bottom + 12}" stroke="black" stroke-width="2" />',
+                    f'<text x="{x_pos:.2f}" y="{plot_bottom + 38}" text-anchor="middle" font-family="sans-serif" font-size="20">{escape(_format_tick(current_x, x_step))}</text>',
+                ]
+            )
+        )
+        current_x += x_step
+
+    y_ticks: list[str] = []
+    current_y = y_min
+    while current_y <= y_max + (y_step / 10):
+        y_pos = _scale_value(current_y, y_min, y_max, plot_bottom, plot_top)
+        y_ticks.append(
+            "\n".join(
+                [
+                    f'<line x1="{plot_left}" y1="{y_pos:.2f}" x2="{plot_right}" y2="{y_pos:.2f}" stroke="#d6d6d6" stroke-width="1" />',
+                    f'<line x1="{plot_left - 12}" y1="{y_pos:.2f}" x2="{plot_left}" y2="{y_pos:.2f}" stroke="black" stroke-width="2" />',
+                    f'<text x="{plot_left - 18}" y="{y_pos + 7:.2f}" text-anchor="end" font-family="sans-serif" font-size="20">{escape(_format_tick(current_y, y_step))}</text>',
+                ]
+            )
+        )
+        current_y += y_step
+
+    bars: list[str] = []
+    for index, count in enumerate(counts):
+        bar_x0 = plot_left + (index / bins) * plot_width
+        bar_x1 = plot_left + ((index + 1) / bins) * plot_width
+        bar_y = _scale_value(float(count), y_min, y_max, plot_bottom, plot_top)
+        midpoint = x_min + (index + 0.5) * bin_width
+        tooltip = escape(f"{field_name}: {midpoint:.6f}\ncount: {count}")
+        bars.append(
+            f'<rect x="{bar_x0 + 1:.2f}" y="{bar_y:.2f}" width="{max(1.0, bar_x1 - bar_x0 - 2):.2f}" height="{plot_bottom - bar_y:.2f}" fill="#4c8ec6" fill-opacity="0.85"><title>{tooltip}</title></rect>'
+        )
+
+    title = f"{field_name} histogram"
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white" />',
+        f'<text x="{width / 2:.0f}" y="40" text-anchor="middle" font-family="sans-serif" font-size="28" font-weight="600">{escape(title)}</text>',
+        *x_ticks,
+        *y_ticks,
+        f'<line x1="{plot_left}" y1="{plot_bottom}" x2="{plot_right}" y2="{plot_bottom}" stroke="black" stroke-width="2" />',
+        f'<line x1="{plot_left}" y1="{plot_top}" x2="{plot_left}" y2="{plot_bottom}" stroke="black" stroke-width="2" />',
+        f'<text x="{width / 2:.0f}" y="{height - 28}" text-anchor="middle" font-family="sans-serif" font-size="24">{escape(field_name)}</text>',
+        f'<text x="34" y="{height / 2:.0f}" text-anchor="middle" font-family="sans-serif" font-size="24" transform="rotate(-90 34 {height / 2:.0f})">count</text>',
+        *bars,
         "</svg>",
     ]
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -633,40 +763,50 @@ def plot_master_table(input_tsv: Path, output_dir: Path) -> list[Path]:
 
     outputs: list[Path] = []
     plot_specs = [
-        ("true_mutation_rate", "minimap2_ani"),
-        ("true_mutation_rate", "minimap2_dv"),
-        ("true_mutation_rate", "minimap2_query_coverage"),
-        ("true_mutation_rate", "ref_jaccard_similarity"),
-        ("minimap2_ani", "ref_jaccard_similarity"),
-        ("ref_jaccard_similarity", "true_mutation_rate"),
+        {"kind": "histogram", "x": "true_mutation_rate", "download": "true_mutation_rate_histogram.svg", "xDomain": (0.0, 0.20)},
+        {"kind": "histogram", "x": "minimap2_divergence", "download": "minimap2_divergence_histogram.svg", "xDomain": (0.0, 0.25)},
+        {"kind": "histogram", "x": "minimap2_query_coverage", "download": "minimap2_query_coverage_histogram.svg", "xDomain": (0.0, 1.0)},
+        {"kind": "scatter", "x": "true_mutation_rate", "y": "minimap2_ani"},
+        {"kind": "scatter", "x": "true_mutation_rate", "y": "minimap2_dv"},
+        {"kind": "summary", "x": "true_mutation_rate", "y": "minimap2_query_coverage"},
+        {"kind": "scatter", "x": "true_mutation_rate", "y": "ref_jaccard_similarity"},
+        {"kind": "scatter", "x": "minimap2_ani", "y": "ref_jaccard_similarity"},
+        {"kind": "scatter", "x": "ref_jaccard_similarity", "y": "true_mutation_rate"},
+        {"kind": "scatter", "x": "ref_jaccard_similarity", "y": "minimap2_divergence"},
     ]
     if has_jaccard and reference["analysis_mode"] != "reference_chunks":
         plot_specs.extend(
             [
-                ("true_mutation_rate", "jaccard_similarity"),
-                ("minimap2_ani", "jaccard_similarity"),
-                ("jaccard_similarity", "ref_jaccard_similarity"),
-                ("jaccard_similarity", "true_mutation_rate"),
+                {"kind": "scatter", "x": "true_mutation_rate", "y": "jaccard_similarity"},
+                {"kind": "scatter", "x": "minimap2_ani", "y": "jaccard_similarity"},
+                {"kind": "scatter", "x": "jaccard_similarity", "y": "ref_jaccard_similarity"},
+                {"kind": "scatter", "x": "jaccard_similarity", "y": "true_mutation_rate"},
             ]
         )
-    for x_name, y_name in plot_specs:
-        use_summary_plot = y_name == "minimap2_query_coverage"
-        if plt is not None and not use_summary_plot:
-            figure, axis = plt.subplots(figsize=(6, 4))
-            axis.scatter([row[x_name] for row in rows], [row[y_name] for row in rows], alpha=0.8)
-            axis.set_xlabel(x_name)
-            axis.set_ylabel(y_name)
-            axis.set_title(f"{y_name} vs {x_name}")
-            plot_path = output_dir / f"{x_name}_vs_{y_name}.png"
-            figure.tight_layout()
-            figure.savefig(plot_path, dpi=200)
-            plt.close(figure)
+    for spec in plot_specs:
+        if spec["kind"] == "histogram":
+            plot_path = output_dir / str(spec["download"])
+            _write_svg_histogram(rows, str(spec["x"]), plot_path, x_domain=tuple(spec["xDomain"]))
         else:
-            plot_path = output_dir / f"{x_name}_vs_{y_name}.svg"
-            if use_summary_plot:
-                _write_svg_summary(rows, x_name, y_name, plot_path)
+            x_name = str(spec["x"])
+            y_name = str(spec["y"])
+            use_summary_plot = spec["kind"] == "summary"
+            if plt is not None and not use_summary_plot:
+                figure, axis = plt.subplots(figsize=(6, 4))
+                axis.scatter([row[x_name] for row in rows], [row[y_name] for row in rows], alpha=0.8)
+                axis.set_xlabel(x_name)
+                axis.set_ylabel(y_name)
+                axis.set_title(f"{y_name} vs {x_name}")
+                plot_path = output_dir / f"{x_name}_vs_{y_name}.png"
+                figure.tight_layout()
+                figure.savefig(plot_path, dpi=200)
+                plt.close(figure)
             else:
-                _write_svg_scatter(rows, x_name, y_name, plot_path)
+                plot_path = output_dir / f"{x_name}_vs_{y_name}.svg"
+                if use_summary_plot:
+                    _write_svg_summary(rows, x_name, y_name, plot_path)
+                else:
+                    _write_svg_scatter(rows, x_name, y_name, plot_path)
         outputs.append(plot_path)
     return outputs
 
@@ -704,6 +844,39 @@ def write_html_report(
 
     plot_specs = [
         {
+            "id": "plot-hist-true-rate",
+            "title": "true_mutation_rate histogram",
+            "kind": "histogram",
+            "x": "true_mutation_rate",
+            "xDomain": [0.0, 0.20],
+            "xLabel": "true_mutation_rate",
+            "yLabel": "count",
+            "download": "true_mutation_rate_histogram.svg",
+            "bins": 20,
+        },
+        {
+            "id": "plot-hist-minimap-divergence",
+            "title": "minimap2_divergence histogram",
+            "kind": "histogram",
+            "x": "minimap2_divergence",
+            "xDomain": [0.0, 0.25],
+            "xLabel": "minimap2_divergence",
+            "yLabel": "count",
+            "download": "minimap2_divergence_histogram.svg",
+            "bins": 20,
+        },
+        {
+            "id": "plot-hist-coverage",
+            "title": "minimap2_chunk_coverage histogram",
+            "kind": "histogram",
+            "x": "minimap2_query_coverage",
+            "xDomain": [0.0, 1.0],
+            "xLabel": "minimap2_chunk_coverage",
+            "yLabel": "count",
+            "download": "minimap2_query_coverage_histogram.svg",
+            "bins": 20,
+        },
+        {
             "id": "plot-ani-vs-rate",
             "title": "minimap2_ani vs true_mutation_rate",
             "kind": "scatter",
@@ -716,6 +889,7 @@ def write_html_report(
             "download": "true_mutation_rate_vs_minimap2_ani.svg",
             "regressionKey": "true_mutation_rate|minimap2_ani",
             "legendPosition": "right",
+            "colorBy": "minimap2_query_coverage",
         },
         {
             "id": "plot-dv-vs-rate",
@@ -731,6 +905,7 @@ def write_html_report(
             "regressionKey": "true_mutation_rate|minimap2_dv",
             "legendPosition": "right",
             "identityLine": True,
+            "colorBy": "minimap2_query_coverage",
         },
         {
             "id": "plot-coverage-vs-rate",
@@ -770,6 +945,7 @@ def write_html_report(
             "download": "minimap2_ani_vs_ref_jaccard_similarity.svg",
             "regressionKey": "minimap2_ani|ref_jaccard_similarity",
             "legendPosition": "left",
+            "colorBy": "minimap2_query_coverage",
         },
         {
             "id": "plot-divergence-vs-ref-jaccard",
@@ -784,6 +960,21 @@ def write_html_report(
             "download": "ref_jaccard_similarity_vs_true_mutation_rate.svg",
             "regressionKey": "ref_jaccard_similarity|true_mutation_rate",
             "legendPosition": "right",
+        },
+        {
+            "id": "plot-minimap-divergence-vs-ref-jaccard",
+            "title": "minimap2_divergence vs ref_jaccard_similarity",
+            "kind": "scatter",
+            "x": "ref_jaccard_similarity",
+            "y": "minimap2_divergence",
+            "xDomain": [0.0, 1.0],
+            "yDomain": [0.0, 0.25],
+            "xLabel": "ref_jaccard_similarity",
+            "yLabel": "minimap2_divergence",
+            "download": "ref_jaccard_similarity_vs_minimap2_divergence.svg",
+            "regressionKey": "ref_jaccard_similarity|minimap2_divergence",
+            "legendPosition": "right",
+            "colorBy": "minimap2_query_coverage",
         },
     ]
     if has_jaccard and reference["analysis_mode"] != "reference_chunks":
@@ -817,6 +1008,7 @@ def write_html_report(
                 "download": "minimap2_ani_vs_jaccard_similarity.svg",
                 "regressionKey": "minimap2_ani|jaccard_similarity",
                 "legendPosition": "left",
+                "colorBy": "minimap2_query_coverage",
             },
             {
                 "id": "plot-jaccard-vs-ref-jaccard",
@@ -893,6 +1085,7 @@ def write_html_report(
                 "chunk_end": int(row.get("chunk_end", "0") or 0),
                 "true_mutation_rate": float(row["true_mutation_rate"]),
                 "minimap2_ani": None if not minimap2_ani else float(minimap2_ani),
+                "minimap2_divergence": None if not minimap2_ani else 1.0 - float(minimap2_ani),
                 "minimap2_dv": None if not row["minimap2_dv"].strip() else float(row["minimap2_dv"]),
                 "minimap2_query_coverage": float(row["minimap2_query_coverage"]),
                 "jaccard_similarity": None if not row["jaccard_similarity"].strip() else float(row["jaccard_similarity"]),
@@ -1283,6 +1476,9 @@ def write_html_report(
       const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
       const x = d3.scaleLinear().domain(spec.xDomain).range([0, innerWidth]);
       const y = d3.scaleLinear().domain(spec.yDomain).range([innerHeight, 0]);
+      const coverageColor = d3.scaleLinear()
+        .domain([0, 1])
+        .range(["#dc6262", "#1f77b4"]);
 
       g.append("g")
         .attr("transform", `translate(0,${{innerHeight}})`)
@@ -1311,7 +1507,7 @@ def write_html_report(
         .attr("cx", d => x(d[spec.x]))
         .attr("cy", d => y(d[spec.y]))
         .attr("r", 7)
-        .attr("fill", "#1f77b4")
+        .attr("fill", d => spec.colorBy ? coverageColor(d[spec.colorBy]) : "#1f77b4")
         .attr("fill-opacity", 0.85)
         .on("mousemove", (event, d) => showTooltip(event, [
           `rate_label: ${{d.rate_label}}`,
@@ -1322,6 +1518,7 @@ def write_html_report(
           `${{spec.x}}: ${{formatValue(d[spec.x])}}`,
           `${{spec.y}}: ${{formatValue(d[spec.y])}}`,
           `minimap2_ani: ${{formatValue(d.minimap2_ani)}}`,
+          `minimap2_divergence: ${{formatValue(d.minimap2_divergence)}}`,
           `minimap2_dv: ${{formatValue(d.minimap2_dv)}}`,
           `minimap2_chunk_coverage: ${{formatValue(d.minimap2_query_coverage)}}`,
           `jaccard_similarity: ${{formatValue(d.jaccard_similarity)}}`,
@@ -1329,6 +1526,42 @@ def write_html_report(
           `minimap2_preset: ${{d.minimap2_preset}}`
         ]))
         .on("mouseleave", hideTooltip);
+
+      if (spec.colorBy) {{
+        const legendX = width - 180;
+        const legendY = 92;
+        const defs = svg.append("defs");
+        const gradient = defs.append("linearGradient")
+          .attr("id", `${{spec.id}}-coverage-gradient`)
+          .attr("x1", "0%")
+          .attr("y1", "100%")
+          .attr("x2", "0%")
+          .attr("y2", "0%");
+        gradient.append("stop").attr("offset", "0%").attr("stop-color", "#dc6262");
+        gradient.append("stop").attr("offset", "100%").attr("stop-color", "#1f77b4");
+        svg.append("rect")
+          .attr("x", legendX)
+          .attr("y", legendY)
+          .attr("width", 18)
+          .attr("height", 140)
+          .attr("fill", `url(#${{spec.id}}-coverage-gradient)`)
+          .attr("stroke", "#999");
+        svg.append("text")
+          .attr("x", legendX + 28)
+          .attr("y", legendY + 8)
+          .attr("font-size", 14)
+          .text("chunk coverage");
+        svg.append("text")
+          .attr("x", legendX + 28)
+          .attr("y", legendY + 28)
+          .attr("font-size", 14)
+          .text("1.0");
+        svg.append("text")
+          .attr("x", legendX + 28)
+          .attr("y", legendY + 140)
+          .attr("font-size", 14)
+          .text("0.0");
+      }}
 
       if (spec.identityLine) {{
         const identityPoints = [
@@ -1576,9 +1809,80 @@ def write_html_report(
         .text(spec.yLabel);
     }}
 
+    function drawHistogram(spec) {{
+      const host = d3.select(`#${{spec.id}}`);
+      const width = 1060;
+      const height = 760;
+      const margin = {{ top: 60, right: 40, bottom: 90, left: 120 }};
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+      const values = reportData.map(d => d[spec.x]).filter(v => v !== null && !Number.isNaN(v));
+      const bins = d3.bin().domain(spec.xDomain).thresholds(spec.bins || 20)(values);
+      const yMax = d3.max(bins, d => d.length) || 1;
+
+      const svg = host.append("svg")
+        .attr("viewBox", `0 0 ${{width}} ${{height}}`);
+      const g = svg.append("g").attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+      const x = d3.scaleLinear().domain(spec.xDomain).range([0, innerWidth]);
+      const y = d3.scaleLinear().domain([0, yMax]).nice().range([innerHeight, 0]);
+
+      g.append("g")
+        .attr("transform", `translate(0,${{innerHeight}})`)
+        .call(d3.axisBottom(x).tickFormat(d3.format(".2~f")));
+      g.append("g")
+        .call(d3.axisLeft(y).tickFormat(d3.format("d")));
+      g.append("g")
+        .attr("class", "grid")
+        .attr("transform", `translate(0,${{innerHeight}})`)
+        .call(d3.axisBottom(x).tickSize(-innerHeight).tickFormat(""));
+      g.append("g")
+        .attr("class", "grid")
+        .call(d3.axisLeft(y).tickSize(-innerWidth).tickFormat(""));
+      g.selectAll(".grid line").attr("stroke", "#d6d6d6");
+      g.selectAll(".grid path").remove();
+
+      g.selectAll("rect.bar")
+        .data(bins)
+        .enter()
+        .append("rect")
+        .attr("class", "bar")
+        .attr("x", d => x(d.x0) + 1)
+        .attr("y", d => y(d.length))
+        .attr("width", d => Math.max(1, x(d.x1) - x(d.x0) - 2))
+        .attr("height", d => innerHeight - y(d.length))
+        .attr("fill", "#4c8ec6")
+        .attr("fill-opacity", 0.85)
+        .on("mousemove", (event, d) => showTooltip(event, [
+          `${{spec.x}} bin: ${{formatValue(d.x0)}} to ${{formatValue(d.x1)}}`,
+          `count: ${{d.length}}`
+        ]))
+        .on("mouseleave", hideTooltip);
+
+      svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", 32)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 26)
+        .attr("font-weight", 700)
+        .text(spec.title);
+      svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", height - 18)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 22)
+        .text(spec.xLabel);
+      svg.append("text")
+        .attr("transform", `translate(26,${{height / 2}}) rotate(-90)`)
+        .attr("text-anchor", "middle")
+        .attr("font-size", 22)
+        .text(spec.yLabel);
+    }}
+
     for (const spec of plotSpecs) {{
       if (spec.kind === "summary") {{
         drawCoverageSummary(spec);
+      }} else if (spec.kind === "histogram") {{
+        drawHistogram(spec);
       }} else {{
         drawScatter(spec);
       }}
