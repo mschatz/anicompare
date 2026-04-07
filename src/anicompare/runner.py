@@ -452,13 +452,13 @@ def _write_restart_script(config: ExperimentConfig) -> Path:
     return script_path
 
 
-def _job_status(job: dict[str, object]) -> tuple[bool, bool, bool]:
+def _job_status(job: dict[str, object]) -> tuple[bool, bool, bool, bool]:
     replicate_dir = Path(str(job["replicate_dir"]))
     sam_present = _ensure_compressed_sam(replicate_dir) is not None
     metrics_present = (replicate_dir / "minimap2_metrics.tsv").exists()
     comparison_present = (replicate_dir / "jaccard_metrics.tsv").exists()
     summary_present = (replicate_dir / "run_summary.tsv").exists()
-    return sam_present, metrics_present, comparison_present and summary_present, summary_present
+    return sam_present, metrics_present, comparison_present, comparison_present and summary_present
 
 
 def _print_status_snapshot(jobs: list[dict[str, object]]) -> None:
@@ -479,6 +479,84 @@ def _print_status_snapshot(jobs: list[dict[str, object]]) -> None:
         f"sam_ready={sam_ready} metrics_ready={metrics_ready} ref_jaccard_ready={comparison_ready}",
         flush=True,
     )
+
+
+def _write_summary_row(summary_path: Path, summary_row: dict[str, object]) -> None:
+    write_tsv([summary_row], summary_path, fieldnames=MASTER_FIELDS)
+
+
+def _compute_chunked_ref_jaccard_for_rate(rate_jobs: list[dict[str, object]]) -> None:
+    if not rate_jobs:
+        return
+
+    sketch_config = SketchConfig(
+        mode=str(rate_jobs[0]["sketch_mode"]),
+        modulus=int(rate_jobs[0]["modimizer_modulus"]),
+    )
+    k = int(rate_jobs[0]["k"])
+    mutated_source = Path(str(rate_jobs[0]["mutated_source_path"]))
+    build_start = time.perf_counter()
+    mutated_records = read_fasta(mutated_source)
+    mutated_set = _comparison_set(mutated_records, k=k, sketch_config=sketch_config)
+    shared_build_seconds = time.perf_counter() - build_start
+    shared_per_job_seconds = shared_build_seconds / len(rate_jobs)
+
+    completed = 0
+    for job in rate_jobs:
+        replicate_dir = Path(str(job["replicate_dir"]))
+        jaccard_metrics_path = replicate_dir / "jaccard_metrics.tsv"
+        summary_path = replicate_dir / "run_summary.tsv"
+        log_path = replicate_dir / "run.log"
+
+        cached_comparison = _read_single_tsv_row(jaccard_metrics_path)
+        summary_row = _read_cached_summary(summary_path)
+        per_job_ref_seconds = shared_per_job_seconds
+
+        if cached_comparison is None:
+            ref_start = time.perf_counter()
+            reference_records = read_fasta(Path(str(job["reference_path"])))
+            reference_set = _comparison_set(reference_records, k=k, sketch_config=sketch_config)
+            ref_jaccard = reference_jaccard_similarity(reference_set, mutated_set)
+            per_job_ref_seconds += time.perf_counter() - ref_start
+            write_tsv(
+                [
+                    {
+                        "comparison_mode": sketch_config.mode,
+                        "k": k,
+                        "modimizer_modulus": int(job["modimizer_modulus"]),
+                        "reference_features": len(reference_set),
+                        "query_features": len(mutated_set),
+                        "jaccard_similarity": "",
+                        "ref_jaccard_similarity": ref_jaccard,
+                    }
+                ],
+                jaccard_metrics_path,
+                fieldnames=[
+                    "comparison_mode",
+                    "k",
+                    "modimizer_modulus",
+                    "reference_features",
+                    "query_features",
+                    "jaccard_similarity",
+                    "ref_jaccard_similarity",
+                ],
+            )
+            _write_log(log_path, [f"Computed ref-jaccard metrics in per-rate batch pass ({per_job_ref_seconds:.3f}s)"])
+        else:
+            ref_jaccard = float(cached_comparison["ref_jaccard_similarity"])
+            _write_log(log_path, [f"Reused existing ref-jaccard metrics TSV in per-rate batch pass (+{shared_per_job_seconds:.3f}s shared setup)"])
+
+        if summary_row is None:
+            raise ValueError(f"Expected summary TSV before ref-jaccard batch pass: {summary_path}")
+        summary_row["jaccard_similarity"] = ""
+        summary_row["ref_jaccard_similarity"] = ref_jaccard
+        summary_row["timing_ref_jaccard_seconds"] = per_job_ref_seconds
+        _write_summary_row(summary_path, summary_row)
+        completed += 1
+        print(
+            f"[ref-jaccard] completed={completed}/{len(rate_jobs)} rate={job['rate_label']} chunk={job['replicate']}",
+            flush=True,
+        )
 
 
 def _run_single_job(job: dict[str, object]) -> dict[str, object]:
@@ -627,12 +705,22 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
 
     sketch_config = SketchConfig(mode=str(job["sketch_mode"]), modulus=int(job["modimizer_modulus"]))
     cached_comparison = _read_single_tsv_row(jaccard_metrics_path)
-    if cached_comparison is None:
+    if str(job.get("analysis_mode", "whole_reference")) == "reference_chunks":
+        if cached_comparison is not None:
+            ref_jaccard_start = time.perf_counter()
+            jaccard = _parse_optional_float(cached_comparison.get("jaccard_similarity", "")) or math.nan
+            ref_jaccard = float(cached_comparison["ref_jaccard_similarity"])
+            ref_jaccard_seconds += time.perf_counter() - ref_jaccard_start
+            _write_log(log_path, ["Reused existing ref-jaccard metrics TSV"])
+        else:
+            jaccard = math.nan
+            ref_jaccard = ""
+            _write_log(log_path, ["Deferred ref-jaccard metrics to per-rate batch pass"])
+    elif cached_comparison is None:
         ref_jaccard_start = time.perf_counter()
         reference_set = _comparison_set(reference_records, k=int(job["k"]), sketch_config=sketch_config)
         mutated_set = _comparison_set(mutated_records, k=int(job["k"]), sketch_config=sketch_config)
-        compute_jaccard = str(job.get("analysis_mode", "whole_reference")) != "reference_chunks"
-        jaccard = jaccard_similarity(reference_set, mutated_set) if compute_jaccard else math.nan
+        jaccard = jaccard_similarity(reference_set, mutated_set)
         ref_jaccard = reference_jaccard_similarity(reference_set, mutated_set)
 
         write_tsv(
@@ -643,7 +731,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                     "modimizer_modulus": int(job["modimizer_modulus"]),
                     "reference_features": len(reference_set),
                     "query_features": len(mutated_set),
-                    "jaccard_similarity": "" if math.isnan(jaccard) else jaccard,
+                    "jaccard_similarity": jaccard,
                     "ref_jaccard_similarity": ref_jaccard,
                 }
             ],
@@ -712,7 +800,11 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         log_path,
         [
             ("Computed jaccard=NA" if math.isnan(jaccard) else f"Computed jaccard={jaccard:.6f}"),
-            f"Computed ref-jaccard={ref_jaccard:.6f}",
+            (
+                "Computed ref-jaccard=DEFERRED"
+                if ref_jaccard == ""
+                else f"Computed ref-jaccard={float(ref_jaccard):.6f}"
+            ),
             f"Computed minimap2 ANI={sam_metrics.ani:.6f}",
             (
                 "Computed minimap2 divergence estimate="
@@ -851,6 +943,21 @@ def run_experiment(config: ExperimentConfig) -> Path:
                         f"[progress] completed={index}/{len(jobs)} rate={job['rate_label']} observation={job['replicate']}",
                         flush=True,
                     )
+
+    if config.analysis_mode == "reference_chunks":
+        rate_groups: dict[str, list[dict[str, object]]] = {}
+        for job in jobs:
+            rate_groups.setdefault(str(job["rate_label"]), []).append(job)
+        print(f"[ref-jaccard] starting batched per-rate pass for {len(rate_groups)} rates", flush=True)
+        for rate_label in sorted(rate_groups, key=lambda value: next(job["rate"] for job in jobs if job["rate_label"] == value)):
+            rate_jobs = sorted(rate_groups[rate_label], key=lambda job: int(job["replicate"]))
+            _compute_chunked_ref_jaccard_for_rate(rate_jobs)
+        results = []
+        for job in jobs:
+            summary = _read_cached_summary(Path(str(job["replicate_dir"])) / "run_summary.tsv")
+            if summary is None:
+                raise ValueError(f"Missing run summary after batched ref-jaccard pass: {job['replicate_dir']}")
+            results.append(summary)
 
     master_path = config.output_dir / "master_results.tsv"
     results.sort(key=lambda row: (float(row["true_mutation_rate"]), int(row["replicate"])))
