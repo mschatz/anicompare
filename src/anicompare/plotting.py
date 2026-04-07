@@ -218,6 +218,42 @@ def _reference_metrics(input_tsv: Path) -> dict[str, object]:
     }
 
 
+def _query_metrics(input_tsv: Path) -> dict[str, object] | None:
+    results_dir = input_tsv.parent
+    config_path = results_dir / "run_config.json"
+    query_path = results_dir / "query" / "query.fa"
+    if not query_path.exists():
+        return None
+
+    config = read_json(config_path) if config_path.exists() else {}
+    records = read_fasta(query_path)
+    total_length = sum(len(record.sequence) for record in records)
+    gc_count = sum(base in {"G", "C"} for record in records for base in record.sequence.upper())
+    gc_fraction = gc_count / total_length if total_length else 0.0
+
+    if config.get("query_fasta"):
+        source = "query_fasta"
+        source_value = config.get("query_fasta", "NA")
+    elif config.get("variable_chunk_mutation"):
+        source = "variable_chunk_mutation"
+        source_value = (
+            f'{config.get("variable_chunk_min_rate", "NA")} to '
+            f'{config.get("variable_chunk_max_rate", "NA")} substitutions per chunk'
+        )
+    else:
+        source = "mutated_query"
+        source_value = "generated during experiment"
+
+    return {
+        "source": source,
+        "source_value": source_value,
+        "contigs": len(records),
+        "length": total_length,
+        "gc_fraction": gc_fraction,
+        "query_path": str(query_path),
+    }
+
+
 def _load_master_table(path: Path) -> list[dict[str, float]]:
     rows: list[dict[str, float | str]] = []
     for row in read_tsv(path):
@@ -831,6 +867,7 @@ def write_html_report(
     rows = _load_master_table(input_tsv)
     full_rows = _load_full_master_rows(input_tsv)
     reference = _reference_metrics(input_tsv)
+    query = _query_metrics(input_tsv)
     timing = _timing_summary(full_rows)
     observation_label = "chunk" if reference["analysis_mode"] == "reference_chunks" else "replicate"
     observation_label_title = observation_label.title()
@@ -1420,6 +1457,20 @@ def write_html_report(
         <div class="stat long"><span class="label">Reference FASTA</span><span class="value">{escape(str(reference['reference_path']))}</span></div>
       </div>
     </section>
+
+    {(
+      '<section class="section">'
+      '<h2>Query Genome</h2>'
+      '<div class="reference-grid">'
+      f'<div class="stat compact"><span class="label">Source</span><span class="value">{escape(str(query["source"]))}</span></div>'
+      f'<div class="stat compact"><span class="label">Contigs</span><span class="value">{query["contigs"]}</span></div>'
+      f'<div class="stat compact"><span class="label">Total length</span><span class="value">{query["length"]}</span></div>'
+      f'<div class="stat compact"><span class="label">GC fraction</span><span class="value">{query["gc_fraction"]:.4f}</span></div>'
+      f'<div class="stat long"><span class="label">Source value</span><span class="value">{escape(str(query["source_value"]))}</span></div>'
+      f'<div class="stat long"><span class="label">Query FASTA</span><span class="value">{escape(str(query["query_path"]))}</span></div>'
+      '</div>'
+      '</section>'
+    ) if query is not None else ''}
 
     <section class="section">
       <h2>Timing</h2>
