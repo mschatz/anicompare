@@ -1011,6 +1011,30 @@ def write_html_report(
     .stat .value {{
       font-size: 1.3rem;
       font-weight: 700;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }}
+    .reference-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }}
+    .reference-grid .stat.compact {{
+      min-height: 108px;
+    }}
+    .reference-grid .stat.long {{
+      grid-column: 1 / -1;
+    }}
+    .reference-grid .stat.long .value {{
+      font-size: 0.98rem;
+      font-weight: 600;
+      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #f0ece1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      display: block;
     }}
     .section {{
       margin-top: 26px;
@@ -1134,16 +1158,16 @@ def write_html_report(
 
     <section class="section">
       <h2>Reference Genome</h2>
-      <div class="stats">
-        <div class="stat"><span class="label">Source</span><span class="value">{escape(str(reference['source']))}</span></div>
-        <div class="stat"><span class="label">Source value</span><span class="value">{escape(str(reference['source_value']))}</span></div>
-        <div class="stat"><span class="label">Contigs</span><span class="value">{reference['contigs']}</span></div>
-        <div class="stat"><span class="label">Total length</span><span class="value">{reference['length']}</span></div>
-        <div class="stat"><span class="label">GC fraction</span><span class="value">{reference['gc_fraction']:.4f}</span></div>
-        <div class="stat"><span class="label">Analysis mode</span><span class="value">{escape(str(reference['analysis_mode']))}</span></div>
-        <div class="stat"><span class="label">Chunk length</span><span class="value">{escape(str(reference['chunk_length']))}</span></div>
+      <div class="reference-grid">
+        <div class="stat compact"><span class="label">Source</span><span class="value">{escape(str(reference['source']))}</span></div>
+        <div class="stat compact"><span class="label">Contigs</span><span class="value">{reference['contigs']}</span></div>
+        <div class="stat compact"><span class="label">Total length</span><span class="value">{reference['length']}</span></div>
+        <div class="stat compact"><span class="label">GC fraction</span><span class="value">{reference['gc_fraction']:.4f}</span></div>
+        <div class="stat compact"><span class="label">Analysis mode</span><span class="value">{escape(str(reference['analysis_mode']))}</span></div>
+        <div class="stat compact"><span class="label">Chunk length</span><span class="value">{escape(str(reference['chunk_length']))}</span></div>
+        <div class="stat long"><span class="label">Source value</span><span class="value">{escape(str(reference['source_value']))}</span></div>
+        <div class="stat long"><span class="label">Reference FASTA</span><span class="value">{escape(str(reference['reference_path']))}</span></div>
       </div>
-      <p>Reference FASTA: <code>{escape(str(reference['reference_path']))}</code></p>
     </section>
 
     <section class="section">
