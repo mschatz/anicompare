@@ -40,3 +40,9 @@ def jaccard_similarity(values_a: set[str], values_b: set[str]) -> float:
     if not union:
         return 1.0
     return len(values_a & values_b) / len(union)
+
+
+def reference_jaccard_similarity(reference_values: set[str], query_values: set[str]) -> float:
+    if not reference_values:
+        return 1.0
+    return len(reference_values & query_values) / len(reference_values)

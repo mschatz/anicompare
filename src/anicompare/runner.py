@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .io import FastaRecord, read_fasta, read_json, write_fasta, write_json, write_tsv
-from .kmers import exact_kmer_set, jaccard_similarity
+from .kmers import exact_kmer_set, jaccard_similarity, reference_jaccard_similarity
 from .minimap2_ani import choose_minimap2_preset, parse_sam_for_ani, run_minimap2
 from .modimizers import modimizer_set
 from .mutate import MutationRates, mutate_records
@@ -30,12 +30,15 @@ MASTER_FIELDS = [
     "realized_deletion_rate",
     "minimap2_preset",
     "minimap2_ani",
+    "minimap2_dv",
+    "minimap2_dv_source",
     "minimap2_aligned_bases",
     "minimap2_edit_distance",
     "minimap2_query_bases",
     "minimap2_query_coverage",
     "minimap2_mapped_records",
     "jaccard_similarity",
+    "ref_jaccard_similarity",
     "comparison_mode",
     "k",
 ]
@@ -215,10 +218,21 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 "query_bases": sam_metrics.query_bases,
                 "query_coverage": query_coverage,
                 "ani": "" if sam_metrics.ani is None else sam_metrics.ani,
+                "dv": "" if sam_metrics.divergence_estimate is None else sam_metrics.divergence_estimate,
+                "dv_source": "" if sam_metrics.divergence_source is None else sam_metrics.divergence_source,
             }
         ],
         minimap_metrics_path,
-        fieldnames=["mapped_records", "aligned_bases", "edit_distance", "query_bases", "query_coverage", "ani"],
+        fieldnames=[
+            "mapped_records",
+            "aligned_bases",
+            "edit_distance",
+            "query_bases",
+            "query_coverage",
+            "ani",
+            "dv",
+            "dv_source",
+        ],
     )
 
     reference_records = read_fasta(reference_path)
@@ -226,6 +240,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
     reference_set = _comparison_set(reference_records, k=int(job["k"]), sketch_config=sketch_config)
     mutated_set = _comparison_set(mutated_records, k=int(job["k"]), sketch_config=sketch_config)
     jaccard = jaccard_similarity(reference_set, mutated_set)
+    ref_jaccard = reference_jaccard_similarity(reference_set, mutated_set)
 
     write_tsv(
         [
@@ -236,10 +251,19 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 "reference_features": len(reference_set),
                 "query_features": len(mutated_set),
                 "jaccard_similarity": jaccard,
+                "ref_jaccard_similarity": ref_jaccard,
             }
         ],
         jaccard_metrics_path,
-        fieldnames=["comparison_mode", "k", "modimizer_modulus", "reference_features", "query_features", "jaccard_similarity"],
+        fieldnames=[
+            "comparison_mode",
+            "k",
+            "modimizer_modulus",
+            "reference_features",
+            "query_features",
+            "jaccard_similarity",
+            "ref_jaccard_similarity",
+        ],
     )
 
     metadata_summary = dict(metadata["summary"])
@@ -255,17 +279,33 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         "realized_deletion_rate": metadata_summary["realized_deletion_rate"],
         "minimap2_preset": preset,
         "minimap2_ani": "" if sam_metrics.ani is None else sam_metrics.ani,
+        "minimap2_dv": "" if sam_metrics.divergence_estimate is None else sam_metrics.divergence_estimate,
+        "minimap2_dv_source": "" if sam_metrics.divergence_source is None else sam_metrics.divergence_source,
         "minimap2_aligned_bases": sam_metrics.aligned_bases,
         "minimap2_edit_distance": sam_metrics.edit_distance,
         "minimap2_query_bases": total_query_bases,
         "minimap2_query_coverage": query_coverage,
         "minimap2_mapped_records": sam_metrics.mapped_records,
         "jaccard_similarity": jaccard,
+        "ref_jaccard_similarity": ref_jaccard,
         "comparison_mode": sketch_config.mode,
         "k": int(job["k"]),
     }
     write_tsv([summary_row], summary_path, fieldnames=MASTER_FIELDS)
-    _write_log(log_path, [f"Computed jaccard={jaccard:.6f}", f"Computed minimap2 ANI={sam_metrics.ani:.6f}"])
+    _write_log(
+        log_path,
+        [
+            f"Computed jaccard={jaccard:.6f}",
+            f"Computed ref-jaccard={ref_jaccard:.6f}",
+            f"Computed minimap2 ANI={sam_metrics.ani:.6f}",
+            (
+                "Computed minimap2 divergence estimate="
+                f"{sam_metrics.divergence_estimate:.6f} ({sam_metrics.divergence_source})"
+                if sam_metrics.divergence_estimate is not None
+                else "Computed minimap2 divergence estimate=NA"
+            ),
+        ],
+    )
     return summary_row
 
 

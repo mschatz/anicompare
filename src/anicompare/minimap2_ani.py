@@ -24,6 +24,8 @@ class SamMetrics:
     edit_distance: int
     query_bases: int
     ani: float | None
+    divergence_estimate: float | None
+    divergence_source: str | None
 
 
 def ensure_minimap2_available(executable: str = "minimap2") -> str:
@@ -91,6 +93,9 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
     aligned_bases = 0
     edit_distance = 0
     query_bases = 0
+    weighted_divergence = 0.0
+    divergence_weight_bases = 0
+    divergence_source: str | None = None
 
     with sam_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -109,25 +114,43 @@ def parse_sam_for_ani(sam_path: Path) -> SamMetrics:
 
             cigar = fields[5]
             nm_value = None
+            divergence_value = None
+            local_source = None
             for field in fields[11:]:
                 if field.startswith("NM:i:"):
                     nm_value = int(field[5:])
-                    break
+                elif field.startswith("dv:f:"):
+                    divergence_value = float(field[5:])
+                    local_source = "dv"
+                elif field.startswith("de:f:") and divergence_value is None:
+                    divergence_value = float(field[5:])
+                    local_source = "de"
             if nm_value is None:
                 continue
 
+            local_aligned_bases = _aligned_bases_from_cigar(cigar)
             mapped_records += 1
-            aligned_bases += _aligned_bases_from_cigar(cigar)
+            aligned_bases += local_aligned_bases
             query_bases += _query_bases_from_cigar(cigar)
             edit_distance += nm_value
+            if divergence_value is not None and local_aligned_bases > 0:
+                weighted_divergence += divergence_value * local_aligned_bases
+                divergence_weight_bases += local_aligned_bases
+                if divergence_source is None or divergence_source == "de":
+                    divergence_source = local_source
 
     ani = None
     if aligned_bases > 0:
         ani = max(0.0, 1.0 - (edit_distance / aligned_bases))
+    divergence_estimate = None
+    if divergence_weight_bases > 0:
+        divergence_estimate = weighted_divergence / divergence_weight_bases
     return SamMetrics(
         mapped_records=mapped_records,
         aligned_bases=aligned_bases,
         edit_distance=edit_distance,
         query_bases=query_bases,
         ani=ani,
+        divergence_estimate=divergence_estimate,
+        divergence_source=divergence_source,
     )

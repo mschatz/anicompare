@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .plotting import plot_master_table, write_correlations, write_html_report
+from .plotting import compute_regressions, plot_master_table, write_correlations, write_html_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +21,8 @@ def main() -> None:
     plot_paths = plot_master_table(args.input, args.output_dir)
     correlation_path = args.output_dir / "correlations.tsv"
     correlations = write_correlations(args.input, correlation_path)
-    report_path = write_html_report(args.input, plot_paths, correlations, args.output_dir / "report.html")
+    regressions = compute_regressions(args.input)
+    report_path = write_html_report(args.input, plot_paths, correlations, regressions, args.output_dir / "report.html")
     for plot_path in plot_paths:
         print(plot_path)
     print(correlation_path)
