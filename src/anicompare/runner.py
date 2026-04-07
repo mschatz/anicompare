@@ -17,6 +17,7 @@ from .kmers import exact_kmer_set, jaccard_similarity, reference_jaccard_similar
 from .minimap2_ani import SamMetrics, choose_minimap2_preset, parse_sam_for_ani, run_minimap2
 from .modimizers import modimizer_set
 from .mutate import MutationRates, mutate_records
+from .variable_query import build_variable_chunk_query
 from .random_genome import generate_random_record
 
 
@@ -345,83 +346,15 @@ def _ensure_variable_chunk_query(
         metadata = read_json(metadata_path)
         return {"mutated_path": query_path, "metadata_path": metadata_path, "metadata": metadata}
 
-    if config.seed is None:
-        seed = 0
-    else:
-        seed = config.seed
-    import random
-
-    rng = random.Random(seed)
-    reference_records = read_fasta(reference_path)
-    mutated_records: list[FastaRecord] = []
-    chunk_summaries: list[dict[str, object]] = []
-    total_original = 0
-    total_mutated = 0
-    total_substitutions = 0
-    total_insertions = 0
-    total_deletions = 0
-    chunk_index = 1
-
-    for record in reference_records:
-        mutated_parts: list[str] = []
-        sequence = record.sequence
-        for start in range(0, len(sequence), config.chunk_length):
-            end = min(start + config.chunk_length, len(sequence))
-            chunk_sequence = sequence[start:end]
-            substitution_rate = rng.uniform(config.variable_chunk_min_rate, config.variable_chunk_max_rate)
-            rates = MutationRates(
-                substitution_rate=substitution_rate,
-                insertion_rate=0.0,
-                deletion_rate=0.0,
-            )
-            mutated_chunk_records, metadata = mutate_records(
-                [FastaRecord(header=f"{record.header}|chunk_{chunk_index:04d}", sequence=chunk_sequence)],
-                rates,
-                seed=rng.randint(0, 2**31 - 1),
-            )
-            mutated_parts.append(mutated_chunk_records[0].sequence)
-            chunk_summary = dict(metadata["summary"])
-            chunk_summary.update(
-                {
-                    "chunk_index": chunk_index,
-                    "record_header": record.header,
-                    "chunk_start": start + 1,
-                    "chunk_end": end,
-                    "requested_substitution_rate": substitution_rate,
-                }
-            )
-            chunk_summaries.append(chunk_summary)
-            total_original += int(chunk_summary["original_length"])
-            total_mutated += int(chunk_summary["mutated_length"])
-            total_substitutions += int(chunk_summary["substitutions"])
-            total_insertions += int(chunk_summary["insertions"])
-            total_deletions += int(chunk_summary["deletions"])
-            chunk_index += 1
-        mutated_records.append(FastaRecord(header=record.header, sequence="".join(mutated_parts)))
-
-    metadata = {
-        "query_source": "variable_chunk_mutation",
-        "requested_rates": {
-            "substitution_rate": None,
-            "insertion_rate": 0.0,
-            "deletion_rate": 0.0,
-            "variable_chunk_min_rate": config.variable_chunk_min_rate,
-            "variable_chunk_max_rate": config.variable_chunk_max_rate,
-        },
-        "summary": {
-            "original_length": total_original,
-            "mutated_length": total_mutated,
-            "substitutions": total_substitutions,
-            "insertions": total_insertions,
-            "deletions": total_deletions,
-            "realized_substitution_rate": total_substitutions / total_original if total_original else 0.0,
-            "realized_insertion_rate": total_insertions / total_original if total_original else 0.0,
-            "realized_deletion_rate": total_deletions / total_original if total_original else 0.0,
-        },
-        "chunks": chunk_summaries,
-    }
-    write_fasta(mutated_records, query_path)
-    write_json(metadata, metadata_path)
+    metadata = build_variable_chunk_query(
+        reference_path,
+        query_path,
+        metadata_path,
+        chunk_length=config.chunk_length,
+        min_rate=config.variable_chunk_min_rate,
+        max_rate=config.variable_chunk_max_rate,
+        seed=config.seed,
+    )
     return {"mutated_path": query_path, "metadata_path": metadata_path, "metadata": metadata}
 
 
