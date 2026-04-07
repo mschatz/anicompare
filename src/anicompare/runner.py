@@ -74,6 +74,7 @@ class SketchConfig:
 class ExperimentConfig:
     output_dir: Path
     reference_fasta: Path | None
+    query_fasta: Path | None
     simulate_length: int | None
     replicates: int
     analysis_mode: str
@@ -97,6 +98,7 @@ class ExperimentConfig:
         return {
             "output_dir": str(self.output_dir),
             "reference_fasta": str(self.reference_fasta) if self.reference_fasta else None,
+            "query_fasta": str(self.query_fasta) if self.query_fasta else None,
             "simulate_length": self.simulate_length,
             "replicates": self.replicates,
             "analysis_mode": self.analysis_mode,
@@ -114,7 +116,7 @@ class ExperimentConfig:
             "minimap2_preset": self.minimap2_preset,
             "gc_content": self.gc_content,
             "seed": self.seed,
-            "config_version": 2,
+            "config_version": 3,
         }
 
 
@@ -136,6 +138,18 @@ def _reference_path(output_dir: Path) -> Path:
 
 def _reference_chunk_dir(output_dir: Path) -> Path:
     return _reference_dir(output_dir) / "chunks"
+
+
+def _query_dir(output_dir: Path) -> Path:
+    return output_dir / "query"
+
+
+def _query_path(output_dir: Path) -> Path:
+    return _query_dir(output_dir) / "query.fa"
+
+
+def _query_metadata_path(output_dir: Path) -> Path:
+    return _query_dir(output_dir) / "query_metadata.json"
 
 
 def _chunk_manifest_path(output_dir: Path) -> Path:
@@ -283,6 +297,31 @@ def _ensure_rate_mutation(
     }
 
 
+def _ensure_query_input(config: ExperimentConfig) -> dict[str, object] | None:
+    if config.query_fasta is None:
+        return None
+    query_dir = _query_dir(config.output_dir)
+    query_dir.mkdir(parents=True, exist_ok=True)
+    query_path = _query_path(config.output_dir)
+    metadata_path = _query_metadata_path(config.output_dir)
+    if not query_path.exists():
+        query_records = read_fasta(config.query_fasta)
+        write_fasta(query_records, query_path)
+    if not metadata_path.exists():
+        write_json(
+            {
+                "query_source": str(config.query_fasta),
+                "summary": {
+                    "realized_substitution_rate": 0.0,
+                    "realized_insertion_rate": 0.0,
+                    "realized_deletion_rate": 0.0,
+                },
+            },
+            metadata_path,
+        )
+    return {"mutated_path": query_path, "metadata_path": metadata_path}
+
+
 def _sam_gz_path(replicate_dir: Path) -> Path:
     return replicate_dir / "minimap2.sam.gz"
 
@@ -416,6 +455,8 @@ def _write_restart_script(config: ExperimentConfig) -> Path:
         lines.append(f'  --reference-fasta "{config.reference_fasta}" \\')
     else:
         lines.append(f"  --simulate-length {config.simulate_length} \\")
+    if config.query_fasta is not None:
+        lines.append(f'  --query-fasta "{config.query_fasta}" \\')
     run_lines = [
         f'  --output-dir "{config.output_dir}" \\',
         f"  --replicates {config.replicates} \\",
@@ -843,17 +884,23 @@ def run_experiment(config: ExperimentConfig) -> Path:
     _write_config(config)
     _write_restart_script(config)
     reference_path = _ensure_reference(config)
+    query_input = _ensure_query_input(config)
 
     jobs: list[dict[str, object]] = []
     seed_base = config.seed if config.seed is not None else 0
     if config.analysis_mode == "reference_chunks":
         chunks = _ensure_reference_chunks(config, reference_path)
-        for rate_index, rate in enumerate(config.mutation_rates):
-            shared_mutation = _ensure_rate_mutation(
-                config=config,
-                reference_path=reference_path,
-                rate=rate,
-                seed=seed_base + (rate_index * 1000) + 1,
+        job_rates = config.mutation_rates if query_input is None else (0.0,)
+        for rate_index, rate in enumerate(job_rates):
+            shared_mutation = (
+                query_input
+                if query_input is not None
+                else _ensure_rate_mutation(
+                    config=config,
+                    reference_path=reference_path,
+                    rate=rate,
+                    seed=seed_base + (rate_index * 1000) + 1,
+                )
             )
             for chunk in chunks:
                 replicate_dir = _rate_dir(config.output_dir, rate) / f"chunk_{int(chunk['chunk_index']):04d}"
@@ -864,7 +911,7 @@ def run_experiment(config: ExperimentConfig) -> Path:
                         "mutated_source_path": str(shared_mutation["mutated_path"]),
                         "metadata_source_path": str(shared_mutation["metadata_path"]),
                         "rate": rate,
-                        "rate_label": _rate_label(rate),
+                        "rate_label": _rate_label(rate) if query_input is None else "pairwise",
                         "replicate": int(chunk["chunk_index"]),
                         "reference_label": str(chunk["chunk_header"]),
                         "chunk_start": int(chunk["chunk_start"]),
@@ -883,15 +930,18 @@ def run_experiment(config: ExperimentConfig) -> Path:
                     }
                 )
     else:
-        for rate_index, rate in enumerate(config.mutation_rates):
+        job_rates = config.mutation_rates if query_input is None else (0.0,)
+        for rate_index, rate in enumerate(job_rates):
             for replicate in range(1, config.replicates + 1):
                 replicate_dir = _replicate_dir(config.output_dir, rate, replicate)
                 jobs.append(
                     {
                         "replicate_dir": str(replicate_dir),
                         "reference_path": str(reference_path),
+                        "mutated_source_path": "" if query_input is None else str(query_input["mutated_path"]),
+                        "metadata_source_path": "" if query_input is None else str(query_input["metadata_path"]),
                         "rate": rate,
-                        "rate_label": _rate_label(rate),
+                        "rate_label": _rate_label(rate) if query_input is None else "pairwise",
                         "replicate": replicate,
                         "reference_label": "",
                         "chunk_start": 0,

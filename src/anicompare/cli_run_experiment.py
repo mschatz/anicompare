@@ -13,6 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--reference-fasta", type=Path, help="Reference FASTA path.")
     source_group.add_argument("--simulate-length", type=int, help="Simulate a random reference genome of this length.")
+    parser.add_argument("--query-fasta", type=Path, help="Optional query FASTA for direct pairwise comparison without mutation simulation.")
     parser.add_argument("--output-dir", type=Path, required=True, help="Results directory.")
     parser.add_argument("--replicates", type=int, default=3)
     parser.add_argument("--analysis-mode", choices=["whole_reference", "reference_chunks"], default="whole_reference")
@@ -39,6 +40,7 @@ def main() -> None:
     config = ExperimentConfig(
         output_dir=args.output_dir,
         reference_fasta=args.reference_fasta,
+        query_fasta=args.query_fasta,
         simulate_length=args.simulate_length,
         replicates=args.replicates,
         analysis_mode=args.analysis_mode,
