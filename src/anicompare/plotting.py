@@ -244,6 +244,41 @@ def _load_full_master_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _timing_summary(full_rows: list[dict[str, str]]) -> dict[str, object]:
+    timing_fields = [
+        "timing_mutation_setup_seconds",
+        "timing_minimap2_alignment_seconds",
+        "timing_minimap2_metrics_seconds",
+        "timing_ref_jaccard_seconds",
+        "timing_summary_write_seconds",
+        "timing_total_job_seconds",
+    ]
+    metrics: list[dict[str, float | str]] = []
+    for field in timing_fields:
+        values = [float(row[field]) for row in full_rows if row.get(field, "").strip()]
+        if not values:
+            continue
+        label = field.removeprefix("timing_").removesuffix("_seconds").replace("_", " ")
+        metrics.append(
+            {
+                "field": field,
+                "label": label,
+                "sum_seconds": sum(values),
+                "mean_seconds": sum(values) / len(values),
+                "max_seconds": max(values),
+                "job_count": len(values),
+            }
+        )
+    timing_by_field = {str(metric["field"]): metric for metric in metrics}
+    return {
+        "metrics": metrics,
+        "total_runtime_seconds": float(timing_by_field.get("timing_total_job_seconds", {}).get("sum_seconds", math.nan)),
+        "total_minimap_seconds": float(timing_by_field.get("timing_minimap2_alignment_seconds", {}).get("sum_seconds", math.nan)),
+        "total_ref_jaccard_seconds": float(timing_by_field.get("timing_ref_jaccard_seconds", {}).get("sum_seconds", math.nan)),
+        "mean_job_seconds": float(timing_by_field.get("timing_total_job_seconds", {}).get("mean_seconds", math.nan)),
+    }
+
+
 def compute_correlations(input_tsv: Path) -> list[dict[str, object]]:
     rows = _load_master_table(input_tsv)
     comparisons = [
@@ -646,6 +681,7 @@ def write_html_report(
     rows = _load_master_table(input_tsv)
     full_rows = _load_full_master_rows(input_tsv)
     reference = _reference_metrics(input_tsv)
+    timing = _timing_summary(full_rows)
     observation_label = "chunk" if reference["analysis_mode"] == "reference_chunks" else "replicate"
     observation_label_title = observation_label.title()
     has_jaccard = any(not math.isnan(row["jaccard_similarity"]) for row in rows)
@@ -898,6 +934,20 @@ def write_html_report(
             for row in full_rows
         ]
     )
+    timing_rows = "\n".join(
+        [
+            (
+                "<tr>"
+                f"<td>{escape(str(row['label']))}</td>"
+                f"<td>{float(row['sum_seconds']):.2f}</td>"
+                f"<td>{float(row['mean_seconds']):.2f}</td>"
+                f"<td>{float(row['max_seconds']):.2f}</td>"
+                f"<td>{int(row['job_count'])}</td>"
+                "</tr>"
+            )
+            for row in timing["metrics"]
+        ]
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1075,6 +1125,10 @@ def write_html_report(
         <div class="stat"><span class="label">ref-Jaccard range</span><span class="value">{summary['min_ref_jaccard']:.4f} to {summary['max_ref_jaccard']:.4f}</span></div>
         <div class="stat"><span class="label">k-mer length</span><span class="value">{summary['k']}</span></div>
         <div class="stat"><span class="label">Observation unit</span><span class="value">{escape(observation_label)}</span></div>
+        <div class="stat"><span class="label">Total runtime</span><span class="value">{'N/A' if math.isnan(float(timing['total_runtime_seconds'])) else f"{float(timing['total_runtime_seconds']):.1f}s"}</span></div>
+        <div class="stat"><span class="label">Total minimap2 time</span><span class="value">{'N/A' if math.isnan(float(timing['total_minimap_seconds'])) else f"{float(timing['total_minimap_seconds']):.1f}s"}</span></div>
+        <div class="stat"><span class="label">Total ref-Jaccard time</span><span class="value">{'N/A' if math.isnan(float(timing['total_ref_jaccard_seconds'])) else f"{float(timing['total_ref_jaccard_seconds']):.1f}s"}</span></div>
+        <div class="stat"><span class="label">Mean job time</span><span class="value">{'N/A' if math.isnan(float(timing['mean_job_seconds'])) else f"{float(timing['mean_job_seconds']):.2f}s"}</span></div>
       </div>
     </section>
 
@@ -1090,6 +1144,26 @@ def write_html_report(
         <div class="stat"><span class="label">Chunk length</span><span class="value">{escape(str(reference['chunk_length']))}</span></div>
       </div>
       <p>Reference FASTA: <code>{escape(str(reference['reference_path']))}</code></p>
+    </section>
+
+    <section class="section">
+      <h2>Timing</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>Total seconds</th>
+              <th>Mean seconds</th>
+              <th>Max seconds</th>
+              <th>Jobs</th>
+            </tr>
+          </thead>
+          <tbody>
+            {timing_rows}
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="section">

@@ -6,6 +6,7 @@ import gzip
 import os
 import shutil
 import math
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,20 @@ MASTER_FIELDS = [
     "ref_jaccard_similarity",
     "comparison_mode",
     "k",
+    "timing_mutation_setup_seconds",
+    "timing_minimap2_alignment_seconds",
+    "timing_minimap2_metrics_seconds",
+    "timing_ref_jaccard_seconds",
+    "timing_summary_write_seconds",
+    "timing_total_job_seconds",
+]
+TIMING_FIELDS = [
+    "timing_mutation_setup_seconds",
+    "timing_minimap2_alignment_seconds",
+    "timing_minimap2_metrics_seconds",
+    "timing_ref_jaccard_seconds",
+    "timing_summary_write_seconds",
+    "timing_total_job_seconds",
 ]
 
 
@@ -338,11 +353,50 @@ def _read_cached_summary(summary_path: Path) -> dict[str, object] | None:
             "minimap2_query_coverage",
             "jaccard_similarity",
             "ref_jaccard_similarity",
+            "timing_mutation_setup_seconds",
+            "timing_minimap2_alignment_seconds",
+            "timing_minimap2_metrics_seconds",
+            "timing_ref_jaccard_seconds",
+            "timing_summary_write_seconds",
+            "timing_total_job_seconds",
         }:
             summary[field] = value if not value.strip() else float(value)
         else:
             summary[field] = value
     return summary
+
+
+def _timing_summary_path(output_dir: Path) -> Path:
+    return output_dir / "timing_summary.tsv"
+
+
+def _aggregate_timing_rows(results: list[dict[str, object]]) -> list[dict[str, object]]:
+    aggregates: list[dict[str, object]] = []
+    for field in TIMING_FIELDS:
+        values = [float(row.get(field, 0.0) or 0.0) for row in results]
+        if not values:
+            continue
+        aggregates.append(
+            {
+                "metric": field,
+                "sum_seconds": sum(values),
+                "mean_seconds": sum(values) / len(values),
+                "max_seconds": max(values),
+                "job_count": len(values),
+            }
+        )
+    return aggregates
+
+
+def _print_timing_summary(results: list[dict[str, object]]) -> None:
+    aggregates = _aggregate_timing_rows(results)
+    if not aggregates:
+        return
+    metric_parts = []
+    for row in aggregates:
+        metric_name = str(row["metric"]).removeprefix("timing_").removesuffix("_seconds")
+        metric_parts.append(f"{metric_name}={float(row['sum_seconds']):.2f}s")
+    print(f"[timing] {' '.join(metric_parts)}", flush=True)
 
 
 def _write_restart_script(config: ExperimentConfig) -> Path:
@@ -428,6 +482,12 @@ def _print_status_snapshot(jobs: list[dict[str, object]]) -> None:
 
 
 def _run_single_job(job: dict[str, object]) -> dict[str, object]:
+    job_start = time.perf_counter()
+    mutation_setup_seconds = 0.0
+    minimap2_alignment_seconds = 0.0
+    minimap2_metrics_seconds = 0.0
+    ref_jaccard_seconds = 0.0
+    summary_write_seconds = 0.0
     replicate_dir = Path(str(job["replicate_dir"]))
     replicate_dir.mkdir(parents=True, exist_ok=True)
 
@@ -461,13 +521,16 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
     )
 
     if mutated_source_path is not None and metadata_source_path is not None:
+        mutation_setup_start = time.perf_counter()
         if not mutated_path.exists():
             os.symlink(os.path.relpath(mutated_source_path, start=replicate_dir), mutated_path)
         if not metadata_path.exists():
             os.symlink(os.path.relpath(metadata_source_path, start=replicate_dir), metadata_path)
         metadata = read_json(metadata_source_path)
         _write_log(log_path, [f"Reused shared mutated genome for rate {rate}"])
+        mutation_setup_seconds += time.perf_counter() - mutation_setup_start
     elif not mutated_path.exists() or not metadata_path.exists():
+        mutation_setup_start = time.perf_counter()
         reference_records = read_fasta(reference_path)
         mutated_records, metadata = mutate_records(reference_records, rates, seed=int(job["seed"]))
         write_fasta(mutated_records, mutated_path)
@@ -479,9 +542,12 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 f"Requested rates: sub={rates.substitution_rate}, ins={rates.insertion_rate}, del={rates.deletion_rate}",
             ],
         )
+        mutation_setup_seconds += time.perf_counter() - mutation_setup_start
     else:
+        mutation_setup_start = time.perf_counter()
         metadata = read_json(metadata_path)
         _write_log(log_path, [f"Reused existing mutated genome for rate {rate}"])
+        mutation_setup_seconds += time.perf_counter() - mutation_setup_start
 
     sam_source_path = _ensure_compressed_sam(replicate_dir)
     if sam_source_path is None:
@@ -489,6 +555,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         if preset == "auto":
             preset = choose_minimap2_preset(float(job["rate"]))
         legacy_sam_path = _legacy_sam_path(replicate_dir)
+        minimap2_alignment_start = time.perf_counter()
         run_minimap2(
             reference_fasta=reference_path,
             query_fasta=mutated_path,
@@ -498,6 +565,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
             preset=preset,
         )
         sam_source_path = _compress_sam_file(legacy_sam_path, sam_path)
+        minimap2_alignment_seconds += time.perf_counter() - minimap2_alignment_start
         _write_log(log_path, ["Completed minimap2 alignment"])
     else:
         preset = str(job["minimap2_preset"])
@@ -511,6 +579,7 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
     reference_records = read_fasta(reference_path)
     total_reference_bases = sum(len(record.sequence) for record in reference_records)
     if cached_metrics is None:
+        minimap2_metrics_start = time.perf_counter()
         sam_metrics = parse_sam_for_ani(sam_source_path)
         query_coverage = sam_metrics.reference_covered_bases / total_reference_bases if total_reference_bases else 0.0
         write_tsv(
@@ -538,8 +607,10 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 "dv_source",
             ],
         )
+        minimap2_metrics_seconds += time.perf_counter() - minimap2_metrics_start
         _write_log(log_path, ["Computed minimap2 metrics"])
     else:
+        minimap2_metrics_start = time.perf_counter()
         query_coverage = float(cached_metrics["query_coverage"]) if cached_metrics["query_coverage"].strip() else 0.0
         sam_metrics = SamMetrics(
             mapped_records=int(cached_metrics["mapped_records"]),
@@ -551,11 +622,13 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
             divergence_estimate=_parse_optional_float(cached_metrics.get("dv", "")),
             divergence_source=cached_metrics.get("dv_source", "").strip() or None,
         )
+        minimap2_metrics_seconds += time.perf_counter() - minimap2_metrics_start
         _write_log(log_path, ["Reused existing minimap2 metrics TSV"])
 
     sketch_config = SketchConfig(mode=str(job["sketch_mode"]), modulus=int(job["modimizer_modulus"]))
     cached_comparison = _read_single_tsv_row(jaccard_metrics_path)
     if cached_comparison is None:
+        ref_jaccard_start = time.perf_counter()
         reference_set = _comparison_set(reference_records, k=int(job["k"]), sketch_config=sketch_config)
         mutated_set = _comparison_set(mutated_records, k=int(job["k"]), sketch_config=sketch_config)
         compute_jaccard = str(job.get("analysis_mode", "whole_reference")) != "reference_chunks"
@@ -585,10 +658,13 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 "ref_jaccard_similarity",
             ],
         )
+        ref_jaccard_seconds += time.perf_counter() - ref_jaccard_start
         _write_log(log_path, ["Computed ref-jaccard metrics"])
     else:
+        ref_jaccard_start = time.perf_counter()
         jaccard = _parse_optional_float(cached_comparison.get("jaccard_similarity", "")) or math.nan
         ref_jaccard = float(cached_comparison["ref_jaccard_similarity"])
+        ref_jaccard_seconds += time.perf_counter() - ref_jaccard_start
         _write_log(log_path, ["Reused existing ref-jaccard metrics TSV"])
 
     metadata_summary = dict(metadata["summary"])
@@ -618,7 +694,19 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         "ref_jaccard_similarity": ref_jaccard,
         "comparison_mode": sketch_config.mode,
         "k": int(job["k"]),
+        "timing_mutation_setup_seconds": mutation_setup_seconds,
+        "timing_minimap2_alignment_seconds": minimap2_alignment_seconds,
+        "timing_minimap2_metrics_seconds": minimap2_metrics_seconds,
+        "timing_ref_jaccard_seconds": ref_jaccard_seconds,
+        "timing_summary_write_seconds": 0.0,
+        "timing_total_job_seconds": 0.0,
     }
+    summary_write_start = time.perf_counter()
+    write_tsv([summary_row], summary_path, fieldnames=MASTER_FIELDS)
+    summary_write_seconds = time.perf_counter() - summary_write_start
+    total_job_seconds = time.perf_counter() - job_start
+    summary_row["timing_summary_write_seconds"] = summary_write_seconds
+    summary_row["timing_total_job_seconds"] = total_job_seconds
     write_tsv([summary_row], summary_path, fieldnames=MASTER_FIELDS)
     _write_log(
         log_path,
@@ -631,6 +719,15 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 f"{sam_metrics.divergence_estimate:.6f} ({sam_metrics.divergence_source})"
                 if sam_metrics.divergence_estimate is not None
                 else "Computed minimap2 divergence estimate=NA"
+            ),
+            (
+                "Timing seconds: "
+                f"mutation_setup={mutation_setup_seconds:.3f} "
+                f"minimap2_alignment={minimap2_alignment_seconds:.3f} "
+                f"minimap2_metrics={minimap2_metrics_seconds:.3f} "
+                f"ref_jaccard={ref_jaccard_seconds:.3f} "
+                f"summary_write={summary_write_seconds:.3f} "
+                f"total={total_job_seconds:.3f}"
             ),
         ],
     )
@@ -758,5 +855,11 @@ def run_experiment(config: ExperimentConfig) -> Path:
     master_path = config.output_dir / "master_results.tsv"
     results.sort(key=lambda row: (float(row["true_mutation_rate"]), int(row["replicate"])))
     write_tsv(results, master_path, fieldnames=MASTER_FIELDS)
+    write_tsv(
+        _aggregate_timing_rows(results),
+        _timing_summary_path(config.output_dir),
+        fieldnames=["metric", "sum_seconds", "mean_seconds", "max_seconds", "job_count"],
+    )
+    _print_timing_summary(results)
     print(f"[done] master_table={master_path}", flush=True)
     return master_path
