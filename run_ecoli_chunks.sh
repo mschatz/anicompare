@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${1:-$ROOT_DIR/results/ecoli_chunks}"
-REFERENCE_FASTA="${REFERENCE_FASTA:-$ROOT_DIR/results/ecoli.fa.gz}"
+REFERENCE_FASTA="${REFERENCE_FASTA:-$ROOT_DIR/data/ecoli.fa.gz}"
 MINIMAP2_EXECUTABLE="${MINIMAP2_EXECUTABLE:-/Users/mschatz/miniforge3/bin/minimap2}"
 CHUNK_LENGTH="${CHUNK_LENGTH:-100000}"
 
