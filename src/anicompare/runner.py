@@ -970,7 +970,11 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
                 if ref_jaccard == ""
                 else f"Computed ref-jaccard={float(ref_jaccard):.6f}"
             ),
-            f"Computed minimap2 ANI={sam_metrics.ani:.6f}",
+            (
+                f"Computed minimap2 ANI={sam_metrics.ani:.6f}"
+                if sam_metrics.ani is not None
+                else "Computed minimap2 ANI=NA"
+            ),
             (
                 "Computed minimap2 divergence estimate="
                 f"{sam_metrics.divergence_estimate:.6f} ({sam_metrics.divergence_source})"
