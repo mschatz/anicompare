@@ -79,6 +79,9 @@ class ExperimentConfig:
     replicates: int
     analysis_mode: str
     chunk_length: int
+    variable_chunk_mutation: bool
+    variable_chunk_min_rate: float
+    variable_chunk_max_rate: float
     mutation_rates: tuple[float, ...]
     substitution_scale: float
     insertion_scale: float
@@ -103,6 +106,9 @@ class ExperimentConfig:
             "replicates": self.replicates,
             "analysis_mode": self.analysis_mode,
             "chunk_length": self.chunk_length,
+            "variable_chunk_mutation": self.variable_chunk_mutation,
+            "variable_chunk_min_rate": self.variable_chunk_min_rate,
+            "variable_chunk_max_rate": self.variable_chunk_max_rate,
             "mutation_rates": list(self.mutation_rates),
             "substitution_scale": self.substitution_scale,
             "insertion_scale": self.insertion_scale,
@@ -322,6 +328,103 @@ def _ensure_query_input(config: ExperimentConfig) -> dict[str, object] | None:
     return {"mutated_path": query_path, "metadata_path": metadata_path}
 
 
+def _ensure_variable_chunk_query(
+    config: ExperimentConfig,
+    reference_path: Path,
+) -> dict[str, object] | None:
+    if not config.variable_chunk_mutation:
+        return None
+    if config.analysis_mode != "reference_chunks":
+        raise ValueError("variable_chunk_mutation requires analysis_mode=reference_chunks")
+
+    query_dir = _query_dir(config.output_dir)
+    query_dir.mkdir(parents=True, exist_ok=True)
+    query_path = _query_path(config.output_dir)
+    metadata_path = _query_metadata_path(config.output_dir)
+    if query_path.exists() and metadata_path.exists():
+        metadata = read_json(metadata_path)
+        return {"mutated_path": query_path, "metadata_path": metadata_path, "metadata": metadata}
+
+    if config.seed is None:
+        seed = 0
+    else:
+        seed = config.seed
+    import random
+
+    rng = random.Random(seed)
+    reference_records = read_fasta(reference_path)
+    mutated_records: list[FastaRecord] = []
+    chunk_summaries: list[dict[str, object]] = []
+    total_original = 0
+    total_mutated = 0
+    total_substitutions = 0
+    total_insertions = 0
+    total_deletions = 0
+    chunk_index = 1
+
+    for record in reference_records:
+        mutated_parts: list[str] = []
+        sequence = record.sequence
+        for start in range(0, len(sequence), config.chunk_length):
+            end = min(start + config.chunk_length, len(sequence))
+            chunk_sequence = sequence[start:end]
+            substitution_rate = rng.uniform(config.variable_chunk_min_rate, config.variable_chunk_max_rate)
+            rates = MutationRates(
+                substitution_rate=substitution_rate,
+                insertion_rate=0.0,
+                deletion_rate=0.0,
+            )
+            mutated_chunk_records, metadata = mutate_records(
+                [FastaRecord(header=f"{record.header}|chunk_{chunk_index:04d}", sequence=chunk_sequence)],
+                rates,
+                seed=rng.randint(0, 2**31 - 1),
+            )
+            mutated_parts.append(mutated_chunk_records[0].sequence)
+            chunk_summary = dict(metadata["summary"])
+            chunk_summary.update(
+                {
+                    "chunk_index": chunk_index,
+                    "record_header": record.header,
+                    "chunk_start": start + 1,
+                    "chunk_end": end,
+                    "requested_substitution_rate": substitution_rate,
+                }
+            )
+            chunk_summaries.append(chunk_summary)
+            total_original += int(chunk_summary["original_length"])
+            total_mutated += int(chunk_summary["mutated_length"])
+            total_substitutions += int(chunk_summary["substitutions"])
+            total_insertions += int(chunk_summary["insertions"])
+            total_deletions += int(chunk_summary["deletions"])
+            chunk_index += 1
+        mutated_records.append(FastaRecord(header=record.header, sequence="".join(mutated_parts)))
+
+    metadata = {
+        "query_source": "variable_chunk_mutation",
+        "requested_rates": {
+            "substitution_rate": None,
+            "insertion_rate": 0.0,
+            "deletion_rate": 0.0,
+            "variable_chunk_min_rate": config.variable_chunk_min_rate,
+            "variable_chunk_max_rate": config.variable_chunk_max_rate,
+        },
+        "summary": {
+            "original_length": total_original,
+            "mutated_length": total_mutated,
+            "substitutions": total_substitutions,
+            "insertions": total_insertions,
+            "deletions": total_deletions,
+            "realized_substitution_rate": total_substitutions / total_original if total_original else 0.0,
+            "realized_insertion_rate": total_insertions / total_original if total_original else 0.0,
+            "realized_deletion_rate": total_deletions / total_original if total_original else 0.0,
+        },
+        "chunks": chunk_summaries,
+    }
+    write_fasta(mutated_records, query_path)
+    write_json(metadata, metadata_path)
+    return {"mutated_path": query_path, "metadata_path": metadata_path, "metadata": metadata}
+
+
 def _sam_gz_path(replicate_dir: Path) -> Path:
     return replicate_dir / "minimap2.sam.gz"
 
@@ -462,6 +565,8 @@ def _write_restart_script(config: ExperimentConfig) -> Path:
         f"  --replicates {config.replicates} \\",
         f"  --analysis-mode {config.analysis_mode} \\",
         f"  --chunk-length {config.chunk_length} \\",
+        f"  --variable-chunk-min-rate {config.variable_chunk_min_rate} \\",
+        f"  --variable-chunk-max-rate {config.variable_chunk_max_rate} \\",
         "  --mutation-rates " + " ".join(str(rate) for rate in config.mutation_rates) + " \\",
         f"  --substitution-scale {config.substitution_scale} \\",
         f"  --insertion-scale {config.insertion_scale} \\",
@@ -477,6 +582,8 @@ def _write_restart_script(config: ExperimentConfig) -> Path:
     ]
     if config.seed is not None:
         run_lines.append(f"  --seed {config.seed} \\")
+    if config.variable_chunk_mutation:
+        run_lines.append("  --variable-chunk-mutation \\")
     run_lines.append("  --force")
     lines.extend(
         run_lines
@@ -630,6 +737,11 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         os.symlink(os.path.relpath(reference_path, start=replicate_dir), replicate_dir / "reference.fa")
 
     rate = float(job["rate"])
+    true_mutation_rate_override = job.get("true_mutation_rate_override")
+    realized_substitution_rate_override = job.get("realized_substitution_rate_override")
+    realized_insertion_rate_override = job.get("realized_insertion_rate_override")
+    realized_deletion_rate_override = job.get("realized_deletion_rate_override")
+    true_mutation_rate = rate if true_mutation_rate_override is None else float(true_mutation_rate_override)
     substitution_scale = float(job["substitution_scale"])
     insertion_scale = float(job["insertion_scale"])
     deletion_scale = float(job["deletion_scale"])
@@ -803,13 +915,25 @@ def _run_single_job(job: dict[str, object]) -> dict[str, object]:
         "reference_label": str(job.get("reference_label", "")),
         "chunk_start": int(job.get("chunk_start", 0)),
         "chunk_end": int(job.get("chunk_end", 0)),
-        "true_mutation_rate": rate,
+        "true_mutation_rate": true_mutation_rate,
         "substitution_rate": rates.substitution_rate,
         "insertion_rate": rates.insertion_rate,
         "deletion_rate": rates.deletion_rate,
-        "realized_substitution_rate": metadata_summary["realized_substitution_rate"],
-        "realized_insertion_rate": metadata_summary["realized_insertion_rate"],
-        "realized_deletion_rate": metadata_summary["realized_deletion_rate"],
+        "realized_substitution_rate": (
+            metadata_summary["realized_substitution_rate"]
+            if realized_substitution_rate_override is None
+            else float(realized_substitution_rate_override)
+        ),
+        "realized_insertion_rate": (
+            metadata_summary["realized_insertion_rate"]
+            if realized_insertion_rate_override is None
+            else float(realized_insertion_rate_override)
+        ),
+        "realized_deletion_rate": (
+            metadata_summary["realized_deletion_rate"]
+            if realized_deletion_rate_override is None
+            else float(realized_deletion_rate_override)
+        ),
         "minimap2_preset": preset,
         "minimap2_ani": "" if sam_metrics.ani is None else sam_metrics.ani,
         "minimap2_dv": "" if sam_metrics.divergence_estimate is None else sam_metrics.divergence_estimate,
@@ -885,11 +1009,20 @@ def run_experiment(config: ExperimentConfig) -> Path:
     _write_restart_script(config)
     reference_path = _ensure_reference(config)
     query_input = _ensure_query_input(config)
+    variable_query_input = _ensure_variable_chunk_query(config, reference_path)
+    if query_input is not None and variable_query_input is not None:
+        raise ValueError("query_fasta and variable_chunk_mutation cannot be used together")
+    if variable_query_input is not None:
+        query_input = variable_query_input
 
     jobs: list[dict[str, object]] = []
     seed_base = config.seed if config.seed is not None else 0
     if config.analysis_mode == "reference_chunks":
         chunks = _ensure_reference_chunks(config, reference_path)
+        chunk_metadata_by_index: dict[int, dict[str, object]] = {}
+        if variable_query_input is not None:
+            for chunk_entry in variable_query_input["metadata"]["chunks"]:
+                chunk_metadata_by_index[int(chunk_entry["chunk_index"])] = dict(chunk_entry)
         job_rates = config.mutation_rates if query_input is None else (0.0,)
         for rate_index, rate in enumerate(job_rates):
             shared_mutation = (
@@ -927,6 +1060,26 @@ def run_experiment(config: ExperimentConfig) -> Path:
                         "minimap2_executable": config.minimap2_executable,
                         "minimap2_preset": config.minimap2_preset,
                         "seed": seed_base + (rate_index * 1000) + int(chunk["chunk_index"]),
+                        "true_mutation_rate_override": (
+                            chunk_metadata_by_index.get(int(chunk["chunk_index"]), {}).get("requested_substitution_rate")
+                            if variable_query_input is not None
+                            else None
+                        ),
+                        "realized_substitution_rate_override": (
+                            chunk_metadata_by_index.get(int(chunk["chunk_index"]), {}).get("realized_substitution_rate")
+                            if variable_query_input is not None
+                            else None
+                        ),
+                        "realized_insertion_rate_override": (
+                            chunk_metadata_by_index.get(int(chunk["chunk_index"]), {}).get("realized_insertion_rate")
+                            if variable_query_input is not None
+                            else None
+                        ),
+                        "realized_deletion_rate_override": (
+                            chunk_metadata_by_index.get(int(chunk["chunk_index"]), {}).get("realized_deletion_rate")
+                            if variable_query_input is not None
+                            else None
+                        ),
                     }
                 )
     else:

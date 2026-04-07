@@ -18,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replicates", type=int, default=3)
     parser.add_argument("--analysis-mode", choices=["whole_reference", "reference_chunks"], default="whole_reference")
     parser.add_argument("--chunk-length", type=int, default=100000, help="Reference chunk length for chunked analysis mode.")
+    parser.add_argument("--variable-chunk-mutation", action="store_true", help="For chunked mode, mutate each chunk at its own randomly sampled substitution rate.")
+    parser.add_argument("--variable-chunk-min-rate", type=float, default=0.0, help="Minimum per-chunk substitution rate for variable chunk mutation mode.")
+    parser.add_argument("--variable-chunk-max-rate", type=float, default=0.2, help="Maximum per-chunk substitution rate for variable chunk mutation mode.")
     parser.add_argument("--mutation-rates", type=float, nargs="+", default=DEFAULT_MUTATION_RATES)
     parser.add_argument("--substitution-scale", type=float, default=1.0)
     parser.add_argument("--insertion-scale", type=float, default=0.0)
@@ -45,6 +48,9 @@ def main() -> None:
         replicates=args.replicates,
         analysis_mode=args.analysis_mode,
         chunk_length=args.chunk_length,
+        variable_chunk_mutation=args.variable_chunk_mutation,
+        variable_chunk_min_rate=args.variable_chunk_min_rate,
+        variable_chunk_max_rate=args.variable_chunk_max_rate,
         mutation_rates=tuple(args.mutation_rates),
         substitution_scale=args.substitution_scale,
         insertion_scale=args.insertion_scale,
